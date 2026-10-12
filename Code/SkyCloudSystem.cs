@@ -169,6 +169,9 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	[Property, Group( "Sky" ), Range( 0.1f, 3 )] public float SunDiskDegrees { get; set; } = 0.8f;
 	[Property, Group( "Sky" ), Range( 0.1f, 5 )] public float MoonDiskDegrees { get; set; } = 1.2f;
 
+	/// <summary>Below the horizon: how many degrees the horizon haze takes to fade into the (GroundAlbedo) ground. 90 = haze all the way down.</summary>
+	[Property, Group( "Sky" ), Range( 0.5f, 90 )] public float HorizonFadeDegrees { get; set; } = 15f;
+
 	// ---- Quality / limits -------------------------------------------------
 
 	[Property, Group( "Quality" )] public CloudQuality Quality { get; set; } = CloudQuality.High;
@@ -428,6 +431,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		Attributes.Set( "ground_albedo", Rgb( GroundAlbedo ) );
 		Attributes.Set( "star_brightness", StarBrightness );
 		Attributes.Set( "star_angle", TimeOfDay / 24f * MathF.PI * 2f );
+		Attributes.Set( "horizon_fade", MathF.Sin( HorizonFadeDegrees * MathF.PI / 180f ) );
 
 		// --- World / limits (all in meters) ---
 		Attributes.Set( "ground_z", GroundLevel * InchToMeter );

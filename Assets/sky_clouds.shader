@@ -59,6 +59,7 @@ PS
     float3 ground_albedo     < Attribute("ground_albedo"); > ;
     float  star_brightness   < Attribute("star_brightness"); > ;
     float  star_angle        < Attribute("star_angle"); > ;
+    float  horizon_fade      < Attribute("horizon_fade"); > ;     // sine of the below-horizon haze fade angle
 
     // World / clouds
     float ground_z           < Attribute("ground_z"); > ;
@@ -153,23 +154,42 @@ PS
         return float2(-b - h, -b + h);
     }
 
+    // Distance (km) along a ray with vertical component mu to the virtual planet
+    // surface, from altitude a (km); -1 if the ray clears the planet.
+    // Solves a + t*mu + t^2/(2R) = 0 (curvature approximation, accurate well past
+    // cloud altitudes) using the root form without cancellation. The full sphere
+    // hit at R = 6371 km has no float precision left a few meters above the
+    // surface, which made pixels randomly flip between ground and sky.
+    float GroundDistance(float a, float mu)
+    {
+        float disc = mu * mu - 2.0 * a / PLANET_R;
+        if (mu >= 0.0 || disc < 0.0)
+            return -1.0;
+        return 2.0 * a / (-mu + sqrt(disc));
+    }
+
     // Optical depth from P toward the sun. Returns false if the planet blocks the sun.
     bool AtmoLightDepth(float3 P, float3 sun, out float3 tau)
     {
         tau = float3(0.0, 0.0, 0.0);
 
-        float2 pl = AtmoSphereHit(P, sun, PLANET_R);
-        if (pl.x > 0.0)
+        float r = length(P);
+        if (GroundDistance(max(r - PLANET_R, 0.0005), dot(P, sun) / r) > 0.0)
             return false;
 
         float2 top = AtmoSphereHit(P, sun, ATMO_R);
         float len = max(top.y, 0.0);
-        float ds = len / 4.0;
 
+        // Quadratic step spacing: a low sun's path runs ~1000 km, but nearly all
+        // of its optical depth is in the first few tens of km.
         float odR = 0.0, odM = 0.0, odO = 0.0;
         [unroll] for (int j = 0; j < 4; j++)
         {
-            float h = max(length(P + sun * ((j + 0.5) * ds)) - PLANET_R, 0.0);
+            float u0 = j * 0.25;
+            float u1 = u0 + 0.25;
+            float uS = u0 + 0.125;
+            float ds = len * (u1 * u1 - u0 * u0);
+            float h = max(length(P + sun * (len * uS * uS)) - PLANET_R, 0.0);
             odR += exp(-h / H_RAY) * ds;
             odM += exp(-h / H_MIE) * ds;
             odO += max(0.0, 1.0 - abs(h - 25.0) / 15.0) * ds;
@@ -184,30 +204,40 @@ PS
     float3 AtmoInscatter(float3 p0, float3 rd, float tmax, int steps, float jitter,
                          float3 sun, float sunIntensity, out float3 transmittance)
     {
-        float ds = tmax / steps;
+        float invN = 1.0 / steps;
         float odR = 0.0, odM = 0.0, odO = 0.0;
         float3 sumR = float3(0.0, 0.0, 0.0);
         float3 sumM = float3(0.0, 0.0, 0.0);
 
         [loop] for (int i = 0; i < steps; i++)
         {
-            float t = (i + jitter) * ds;
-            float3 P = p0 + rd * t;
+            // Quadratic step spacing, dense near the camera. A near-horizontal
+            // ray is ~1000 km long but only stays in the low, dense air for the
+            // first few tens of km; with uniform steps one jittered sample
+            // decided the whole result and neighboring pixels disagreed (noise).
+            float u0 = i * invN;
+            float u1 = u0 + invN;
+            float uS = (i + jitter) * invN;
+            float ds = tmax * (u1 * u1 - u0 * u0);
+            float3 P = p0 + rd * (tmax * uS * uS);
             float h = max(length(P) - PLANET_R, 0.0);
 
             float dR = exp(-h / H_RAY) * ds;
             float dM = exp(-h / H_MIE) * ds;
             float dO = max(0.0, 1.0 - abs(h - 25.0) / 15.0) * ds;
-            odR += dR; odM += dM; odO += dO;
 
             float3 tauL;
             if (AtmoLightDepth(P, sun, tauL))
             {
-                float3 tau = BETA_R * odR + BETA_M * 1.1 * odM + BETA_O * odO + tauL;
+                // View optical depth up to the middle of this step.
+                float3 tau = BETA_R * (odR + 0.5 * dR) + BETA_M * 1.1 * (odM + 0.5 * dM)
+                           + BETA_O * (odO + 0.5 * dO) + tauL;
                 float3 att = exp(-tau);
                 sumR += dR * att;
                 sumM += dM * att;
             }
+
+            odR += dR; odM += dM; odO += dO;
         }
 
         transmittance = exp(-(BETA_R * odR + BETA_M * 1.1 * odM + BETA_O * odO));
@@ -253,24 +283,42 @@ PS
     // ------------------------------------------------------------------
     // Sky for pixels with no geometry. Output is tone-mapped (display range).
     // ------------------------------------------------------------------
-    float3 RenderSky(float3 p0, float3 rd, float jitter, int steps)
+    float3 RenderSky(float3 p0, float camAltKm, float3 rd, float jitter, int steps)
     {
-        float2 pl = AtmoSphereHit(p0, rd, PLANET_R);
-        float2 top = AtmoSphereHit(p0, rd, ATMO_R);
-        bool hitsGround = pl.x > 0.0;
-        float tmax = hitsGround ? pl.x : max(top.y, 0.01);
+        float tGround = GroundDistance(camAltKm, rd.z);
+        float3 hdr;
 
-        float3 viewT;
-        float3 ins = AtmoInscatter(p0, rd, tmax, steps, jitter, sun_dir, sky_sun_intensity, viewT);
-        float3 hdr = ins;
-
-        if (hitsGround)
+        if (tGround > 0.0)
         {
-            // Fallback ground below the horizon (e.g. beyond the end of the terrain).
-            hdr += ground_albedo * (sun_color * saturate(sun_dir.z) * 0.3183 + ambient_bottom) * viewT;
+            // Below the horizon: lit ground seen through the haze along the ray.
+            float3 viewT;
+            float3 ins = AtmoInscatter(p0, rd, tGround, max(steps / 2, 4), jitter, sun_dir, sky_sun_intensity, viewT);
+            float3 ground = ins + ground_albedo * (sun_color * saturate(sun_dir.z) * 0.3183 + ambient_bottom) * viewT;
+
+            // Horizon haze at the same azimuth (aimed just above the geometric
+            // horizon), faded into the ground over horizon_fade. At the horizon
+            // this matches the sky pixels above it, so there is no seam.
+            float dip = sqrt(2.0 * camAltKm / PLANET_R); // sine of the horizon depression
+            float2 hz = rd.xy;
+            float hl = length(hz);
+            hz = hl > 0.0001 ? hz / hl : float2(1.0, 0.0);
+            float hzZ = 0.002 - dip;
+            float3 rdH = float3(hz * sqrt(1.0 - hzZ * hzZ), hzZ);
+
+            float3 hT;
+            float tH = max(AtmoSphereHit(p0, rdH, ATMO_R).y, 0.01);
+            float3 horizon = AtmoInscatter(p0, rdH, tH, steps, jitter, sun_dir, sky_sun_intensity, hT);
+
+            float f = smoothstep(0.0, max(horizon_fade, 0.001), -rd.z - dip);
+            hdr = lerp(horizon, ground, f);
         }
         else
         {
+            float tmax = max(AtmoSphereHit(p0, rd, ATMO_R).y, 0.01);
+            float3 viewT;
+            float3 ins = AtmoInscatter(p0, rd, tmax, steps, jitter, sun_dir, sky_sun_intensity, viewT);
+            hdr = ins;
+
             // Stars fade out as the sky brightens (twilight and daytime handled for free).
             float lum = dot(ins, float3(0.3333, 0.3333, 0.3333));
             float night = exp(-lum * sky_exposure * 25.0);
@@ -402,7 +450,7 @@ PS
         if (isSky)
         {
             if (sky_enabled > 0.5)
-                bg = RenderSky(p0, rd, jitter, skySteps);
+                bg = RenderSky(p0, camAltKm, rd, jitter, skySteps);
         }
         else if (aerial_strength > 0.001 && sceneDist > 100.0)
         {
@@ -486,7 +534,8 @@ PS
                 float dt = D * (pow(u1, expo) - pow(u0, expo));
 
                 float3 pos = ro + rd * tS;
-                float dens = SampleDensity(pos, R[layer], P[layer], N[layer]);
+                float detailW = 1.0 - smoothstep(8000.0, 16000.0, tS);
+                float dens = SampleDensity(pos, R[layer], P[layer], N[layer], detailW);
 
                 // Fade toward the distance cap so the cutoff is invisible.
                 dens *= 1.0 - smoothstep(0.6 * max_cloud_distance, max_cloud_distance, tS);

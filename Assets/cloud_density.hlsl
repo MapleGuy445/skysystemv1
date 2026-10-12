@@ -68,13 +68,17 @@ float SampleDensityLight(float3 pos, float4 range, float4 prm, float4 nz)
     return BaseCloudDensity(pos, range, prm, nz, h) * range.w;
 }
 
-// Full density for the view march.
-float SampleDensity(float3 pos, float4 range, float4 prm, float4 nz)
+// Full density for the view march. detailWeight (0..1) fades the erosion out
+// with distance: far away the march steps are larger than the detail tile, so
+// sampling it only adds aliasing noise.
+float SampleDensity(float3 pos, float4 range, float4 prm, float4 nz, float detailWeight)
 {
     float h;
     float d = BaseCloudDensity(pos, range, prm, nz, h);
     if (d <= 0.0)
         return 0.0;
+    if (detailWeight <= 0.0)
+        return d * range.w;
 
     float3 p = float3(pos.xy + prm.yz, pos.z);
 
@@ -86,7 +90,7 @@ float SampleDensity(float3 pos, float4 range, float4 prm, float4 nz)
     detail = lerp(detail, 1.0 - detail, saturate(h * 10.0));
 
     float inv = 1.0 - d;
-    float erosion = detail * prm.w * 0.7 * inv * inv;
+    float erosion = detail * prm.w * detailWeight * 0.7 * inv * inv;
     d = saturate(CloudRemap(d, erosion, 1.0, 0.0, 1.0));
 
     return d * range.w;

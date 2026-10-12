@@ -102,7 +102,7 @@ s&box compiles user code with a **whitelist**. `System.Threading.Tasks.Parallel`
 - Direct sun color is the atmosphere-tinted color, so sunsets color the clouds automatically.
 
 ### Shader attribute contract (names must match C# and HLSL)
-`sun_dir, sun_color, ambient_top, ambient_bottom, sun_disk_cos, moon_dir, moon_disk_cos, sky_enabled, sky_sun_intensity, sky_exposure, cloud_exposure, aerial_strength, ground_albedo, star_brightness, star_angle, ground_z, max_cloud_distance, far_distance, extinction, step_count, light_steps, sky_steps, debug_mode, layer{0,1,2}_range, layer{0,1,2}_params, layer{0,1,2}_noise, ShapeNoise, DetailNoise, WeatherMap`
+`sun_dir, sun_color, ambient_top, ambient_bottom, sun_disk_cos, moon_dir, moon_disk_cos, sky_enabled, sky_sun_intensity, sky_exposure, cloud_exposure, aerial_strength, ground_albedo, star_brightness, star_angle, horizon_fade, ground_z, max_cloud_distance, far_distance, extinction, step_count, light_steps, sky_steps, debug_mode, layer{0,1,2}_range, layer{0,1,2}_params, layer{0,1,2}_noise, ShapeNoise, DetailNoise, WeatherMap`
 
 ### Debug views (`CloudDebugView`)
 - `LayerIntervals`: R/G/B show each layer's march interval (verified working).
@@ -195,7 +195,9 @@ The current implementation is expensive: a light march at every cloud step and a
 - **`Sun.WorldRotation` is overwritten every frame** when `DriveSun` is on.
 - **Layers must not overlap in altitude** (the shader assumes disjoint slabs).
 - **Near-horizontal rays** produce very long march intervals; handled by a capped distance, growing step size, and a distance fade (`0.6 * max` to `max`) that hides the cap.
-- **Sphere math at real scale:** never use the naive `b*b - c` form; use the closest-approach vector form.
+- **Sphere math at real scale:** never use the naive `b*b - c` form; use the closest-approach vector form. Even that form fails for the *near* hit when the origin is meters above a 6371 km sphere (float has ~0.5 m precision there): use `GroundDistance` (stable root of `a + t*mu + t^2/2R = 0`) for planet/ground hits.
+- **Atmosphere step spacing must be non-uniform.** Horizon rays are ~1000 km long but their scattering is concentrated in the first tens of km; uniform steps plus jitter produced strong horizon noise. Both the view and sun marches use quadratic spacing.
+- **Detail noise aliases at distance:** detail erosion fades out between 8 and 16 km (view-march steps there exceed the 400 m detail tile).
 - **Light march cost:** grows as view steps times light steps. Phase 5 is the fix.
 - **Detail erosion:** a flat threshold made the detail texture's cell pattern dominate at high strength. It now scales by `(1 - density)^2`. If the pattern is still visible, raise `DetailTilesPerKm` (4 to 6) or add distortion.
 - **HLSL:** use `SampleLevel` (not `Sample`) inside loops; prefer integer PCG hashes over `sin`-based hashes.
@@ -220,6 +222,7 @@ The current implementation is expensive: a light march at every cloud step and a
 | `SkySunIntensity` | 22 | Sky brightness. |
 | `SunIntensity` | 1.5 | Direct light on clouds. |
 | `MaxSunElevation` | 70 | Noon sun height. |
+| `HorizonFadeDegrees` | 15 | Below the horizon: angle over which the horizon haze fades into the `GroundAlbedo` ground. 90 = haze all the way down. |
 
 ---
 
