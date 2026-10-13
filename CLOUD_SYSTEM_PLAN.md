@@ -52,6 +52,7 @@ s&box compiles user code with a **whitelist**. `System.Threading.Tasks.Parallel`
 | `[Group( "..." )]` inspector attribute | `SkyCloudSystem.cs` |
 | Whether `Stage.AfterPostProcess` runs before or after engine tone mapping | affects all exposure tuning |
 | `Sandbox.Utility.Parallel.For` return value meaning (ignored by the baker) | `CloudNoiseBaker.cs` |
+| `GpuBuffer<T>` bound via `Attributes.Set` as a `StructuredBuffer` in a post-process blit (API exists; engine tools use it with compute shaders) | `SkyCloudSystem.cs` / `cloud_density.hlsl` |
 
 ### Units
 - s&box world units are **inches**; 1 unit = 0.0254 m.
@@ -67,19 +68,21 @@ s&box compiles user code with a **whitelist**. `System.Threading.Tasks.Parallel`
 | File | Role |
 |---|---|
 | `SkyCloudSystem.cs` | Component (`BasePostProcess<SkyCloudSystem>`). Owns settings, quality tiers, time of day and sun driving, CPU atmosphere (sun tint), ambient colors, scene light sync, wind accumulation, noise baking lifecycle, and all shader attributes. Also contains `CloudLayerSettings`, `CloudQuality`, `CloudDebugView`, `AtmosphereCpu`. |
-| `CloudNoiseBaker.cs` | CPU baker for tileable noise: shape 3D (RGBA8: R Perlin-Worley, GBA Worley fBm), detail 3D (RGB Worley fBm), weather 2D (R coverage, G reserved for cloud type). Uses `Sandbox.Utility.Parallel.For`. |
+| `CloudNoiseBaker.cs` | CPU baker for tileable noise: shape 3D (RGBA8: R Perlin-Worley, GBA Worley fBm), detail 3D (RGB Worley fBm), weather 2D (R coverage, G regional cloud height: where towers cluster). Uses `Sandbox.Utility.Parallel.For`. |
 | `sky_clouds.shader` | Full-screen post-process: atmosphere (single scatter), sun/moon/stars, aerial perspective, slab intersection, layer sorting, cloud view march, cloud light march, composition. |
-| `cloud_density.hlsl` | Included inside the shader's `PS` block. Declares noise textures, sampler and `layerN_noise` attributes. Provides `BaseCloudDensity`, `SampleDensityLight` (no detail), `SampleDensity` (full). |
+| `cloud_density.hlsl` | Included inside the shader's `PS` block. Declares noise textures, sampler, the `CloudLayer` struct and the `CloudLayers` buffer. Provides `CloudTypeProfile`, `BaseCloudDensity` (per-cloud top + type profile + anvil), `SampleDensityLight` (no detail), `SampleDensity` (full). |
 
 ### Core design decisions
 
 - **Baked noise only** (shape, detail, weather). Runtime Perlin was the original biggest cost.
 - **Slab clouds:** horizontal slabs `[bottom, top]` in meters above ground. Ray-slab intersection handles camera below, inside and above, plus near-horizontal rays (no divide by ~0).
-- **Up to 3 volumetric layers**, sorted per ray by entry distance and marched front to back with one shared transmittance. Layers must not overlap in altitude.
-- **Layer data packed into float4 attributes** (`layerN_range`, `layerN_params`, `layerN_noise`) instead of array attributes, to avoid depending on array support.
+- **Up to 8 volumetric layers** in one `StructuredBuffer<CloudLayer>` (`CloudLayers`, C# `GpuBuffer<CloudLayerGpu>`) plus `layer_count`. C# uploads only enabled layers, **sorted by altitude**, and skips any layer that overlaps the one below (warning). The shader walks layers upward for rising rays and downward for falling rays, which is entry order for disjoint slabs (no per-pixel sort). One shared transmittance, front to back.
+- `CloudLayer` = four float4s (64 bytes; C# struct must match):
   - `range`: x bottom (m), y top (m), z coverage, w density
-  - `params`: x shape freq (1/m), y/z wind offset (m), w detail strength
-  - `noise`: x detail freq (1/m), y weather freq (1/m), z weather influence, w reserved
+  - `prm`: x shape freq (1/m), y/z wind offset (m), w detail strength
+  - `nz`: x detail freq (1/m), y weather freq (1/m), z weather influence, w reserved
+  - `shape`: x cloud type (0 stratus, 0.5 cumulus, 1 cumulonimbus), y height variation, z anvil, w reserved
+- **Vertical structure:** bases sit on the layer bottom; each cloud has its own top = `lerp(1, lerp(0.12, 1, tall^2), HeightVariation)` of the layer height, where `tall` mixes a per-cloud signal (shape texture G channel on a fixed 2D slice, ~one Worley cell per cloud), the weather map G (regional) and coverage. The type profile and anvil are evaluated in the cloud's own normalized height, which also drives ambient and detail. For towers use one tall convective layer (e.g. 1.2 to 6.5 km) rather than overlapping layers.
 - **Wind** is accumulated on the C# side as an XY offset (no wrapping, because the three textures tile at different periods).
 - **Sky pixels:** a pixel is sky if reconstructed distance >= 99% of camera far clip. Clouds then march out to `MaxCloudDistanceKm`; the sky is rendered only for these pixels.
 - **Atmosphere:** single-scatter march (Rayleigh, Mie g=0.76, ozone) on a virtual 6371 km planet, camera at `(0, 0, R + altitude)`. Cancellation-safe sphere intersection. A CPU copy (`AtmosphereCpu`) computes sun transmittance at camera altitude so cloud light, scene light and sky agree.
@@ -102,7 +105,7 @@ s&box compiles user code with a **whitelist**. `System.Threading.Tasks.Parallel`
 - Direct sun color is the atmosphere-tinted color, so sunsets color the clouds automatically.
 
 ### Shader attribute contract (names must match C# and HLSL)
-`sun_dir, sun_color, ambient_top, ambient_bottom, sun_disk_cos, moon_dir, moon_disk_cos, sky_enabled, sky_sun_intensity, sky_exposure, cloud_exposure, aerial_strength, ground_albedo, star_brightness, star_angle, horizon_fade, ground_z, max_cloud_distance, far_distance, extinction, step_count, light_steps, sky_steps, debug_mode, layer{0,1,2}_range, layer{0,1,2}_params, layer{0,1,2}_noise, ShapeNoise, DetailNoise, WeatherMap`
+`sun_dir, sun_color, ambient_top, ambient_bottom, sun_disk_cos, moon_dir, moon_disk_cos, sky_enabled, sky_sun_intensity, sky_exposure, cloud_exposure, aerial_strength, ground_albedo, star_brightness, star_angle, horizon_fade, ground_z, max_cloud_distance, far_distance, extinction, step_count, light_steps, sky_steps, debug_mode, CloudLayers, layer_count, ShapeNoise, DetailNoise, WeatherMap`
 
 ### Debug views (`CloudDebugView`)
 - `LayerIntervals`: R/G/B show each layer's march interval (verified working).
@@ -151,7 +154,7 @@ The current implementation is expensive: a light march at every cloud step and a
 - **Done when:** all four tiers run, with measured frame time recorded per tier.
 
 ### Phase 6: Multiple layers and weather
-- Per-layer **cloud type** via height gradient (stratus, cumulus, cumulonimbus, altocumulus) selected by data. The current gradient is hard-coded in `BaseCloudDensity`. The weather map's G channel is reserved for cloud type.
+- ~~Per-layer cloud type~~ Done (2026-10-13): `CloudType`, `HeightVariation`, `Anvil` per layer; weather map G = regional height. Still open: anvils drifting downwind, per-cloud type variation within a layer.
 - Cheap 2D cirrus layers (any number), with two-sided shading and a soft fade when the camera is near the plane.
 - **Cross-layer shadowing:** the light march should account for layers between the sample and the sun (a cheap coverage lookup per layer, not a full march).
 - `WeatherState` presets (clear, partly cloudy, overcast, storm) blending coverage, density, extinction, cloud darkening, fog, wind and sun dimming. Single entry point for gameplay to transition.
@@ -212,11 +215,14 @@ The current implementation is expensive: a light march at every cloud step and a
 |---|---|---|
 | `ExtinctionPerMeter` | 0.015 | Overall cloud opacity. First slider to touch for "too thick/too thin". |
 | Layer coverage (low / high) | 0.35 / 0.25 | Where clouds exist (threshold). |
+| `CloudType` | 0.6 (convective), 0.25 (mid deck) | Profile over each cloud's height: 0 stratus, 0.5 cumulus, 1 cumulonimbus. |
+| `HeightVariation` | 0.85 (convective), 0 (mid deck) | 0 = all clouds fill the layer; 1 = tops from 12% to 100% of the layer. |
+| `Anvil` | 0.5 (convective) | Spread of the tallest clouds near the layer top. |
 | `WeatherInfluence` | 0.8 | How strongly the weather map opens and closes gaps. |
 | `ShapeTilesPerKm` | 0.12 (low), 0.08 (high) | Higher = smaller, more numerous clouds. |
 | `DetailTilesPerKm` | 2.5 | Higher = finer edge wisps. |
 | `DetailStrength` | 0.6 | Edge erosion. Effective strength is 0.7 x slider, weighted toward cloud fringes. |
-| Layer altitudes | 1200 to 2200 m, 3500 to 4300 m | Low cumulus layer, thinner altocumulus layer. |
+| Layer altitudes | 1200 to 6500 m, 7000 to 7800 m | Tall convective layer (small cumulus to towers), thin mid deck above. |
 | `MaxCloudDistanceKm` | 40 | March distance cap. |
 | `SkyExposure` / `CloudExposure` | 2.0 / 0.6 | Tone-mapping exposure. |
 | `SkySunIntensity` | 22 | Sky brightness. |

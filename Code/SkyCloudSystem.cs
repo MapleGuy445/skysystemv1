@@ -42,6 +42,21 @@ public sealed class CloudLayerSettings
 	[Property, Range( 0, 1 )] public float Coverage { get; set; } = 0.5f;
 	[Property, Range( 0, 2 )] public float Density { get; set; } = 1f;
 
+	// ---- Vertical structure ----
+
+	/// <summary>Density profile over each cloud's height. 0 = stratus (flat sheet), 0.5 = cumulus (rounded top), 1 = cumulonimbus (full column, flat top).</summary>
+	[Property, Range( 0, 1 )] public float CloudType { get; set; } = 0.5f;
+
+	/// <summary>
+	/// How much cloud tops vary. 0 = every cloud fills the whole layer height (old behaviour).
+	/// 1 = tops range from ~12% of the layer (small puffs) up to the layer top (towers).
+	/// Bases always sit on the layer bottom. Use a tall layer (several km) for towering clouds.
+	/// </summary>
+	[Property, Range( 0, 1 )] public float HeightVariation { get; set; } = 0f;
+
+	/// <summary>How much the tallest clouds spread out into an anvil near the layer top.</summary>
+	[Property, Range( 0, 1 )] public float Anvil { get; set; } = 0f;
+
 	// ---- Noise scales: "tiles per km" = how many times the texture repeats per kilometer ----
 
 	/// <summary>Base cloud form. 0.12 = the shape texture repeats every ~8 km.</summary>
@@ -64,6 +79,18 @@ public sealed class CloudLayerSettings
 
 	// Accumulated on the C# side so the shader never multiplies large time values.
 	internal Vector2 WindOffset;
+}
+
+/// <summary>
+/// GPU layout of one layer. Must match "struct CloudLayer" in cloud_density.hlsl
+/// (four float4s, 64 bytes).
+/// </summary>
+struct CloudLayerGpu
+{
+	public Vector4 Range;  // x bottom (m), y top (m), z coverage, w density
+	public Vector4 Params; // x shape freq (1/m), y/z wind offset (m), w detail strength
+	public Vector4 Noise;  // x detail freq (1/m), y weather freq (1/m), z weather influence, w reserved
+	public Vector4 Shape;  // x cloud type, y height variation, z anvil, w reserved
 }
 
 /// <summary>
@@ -125,7 +152,9 @@ static class AtmosphereCpu
 public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 {
 	const float InchToMeter = 0.0254f;
-	const int MaxLayers = 3;
+	// Layers go to the shader as one StructuredBuffer (CloudLayers) plus a count.
+	// Must match MAX_LAYERS in sky_clouds.shader.
+	const int MaxLayers = 8;
 
 	// ---- Sun & time -------------------------------------------------------
 
@@ -195,8 +224,12 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	[Property, Group( "Layers" )]
 	public List<CloudLayerSettings> Layers { get; set; } = new()
 	{
-		new CloudLayerSettings { BottomMeters = 1200, TopMeters = 2200, Coverage = 0.35f, ShapeTilesPerKm = 0.12f },
-		new CloudLayerSettings { BottomMeters = 3500, TopMeters = 4300, Coverage = 0.25f, ShapeTilesPerKm = 0.08f },
+		// Convective layer: flat bases at 1.2 km, mostly small cumulus, occasional towers with anvils up to 6.5 km.
+		new CloudLayerSettings { BottomMeters = 1200, TopMeters = 6500, Coverage = 0.35f, ShapeTilesPerKm = 0.12f,
+			CloudType = 0.6f, HeightVariation = 0.85f, Anvil = 0.5f },
+		// Mid deck: thin altocumulus / altostratus above the towers.
+		new CloudLayerSettings { BottomMeters = 7000, TopMeters = 7800, Coverage = 0.25f, ShapeTilesPerKm = 0.08f,
+			CloudType = 0.25f },
 	};
 
 	// ---- Debug ------------------------------------------------------------
@@ -206,6 +239,10 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	// ---- Internals --------------------------------------------------------
 
 	Material _material; // cached, created lazily
+
+	GpuBuffer<CloudLayerGpu> _layerBuffer;
+	readonly CloudLayerGpu[] _layerData = new CloudLayerGpu[MaxLayers];
+	readonly List<CloudLayerSettings> _activeLayers = new();
 
 	Texture _shapeNoise;
 	Texture _detailNoise;
@@ -266,6 +303,8 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	{
 		base.OnDisabled();
 		DisposeNoise();
+		_layerBuffer?.Dispose();
+		_layerBuffer = null;
 	}
 
 	void DisposeNoise()
@@ -315,6 +354,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 			+ new Vector3( 0f, 0f, MathF.Sin( a ) * MathF.Sin( e ) )).Normal;
 	}
 
+	// -USER: could we do this calculation gpu side? mostly the part where we calculate transmittance. Make it do it for all pixels on screen? Kinda stops us from passing ambient lighting to the other shader unless we just do it in the sky_clouds.shader
 	void UpdateAtmosphereState()
 	{
 		// ---- Time and sun direction ----
@@ -385,6 +425,63 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		}
 	}
 
+	// ---- Layer upload -----------------------------------------------------
+
+	bool _warnedOverlap;
+
+	/// <summary>
+	/// Packs the enabled layers into the GPU buffer, sorted by altitude (lowest
+	/// first). The shader relies on that order and on the slabs not overlapping,
+	/// so a layer that overlaps the one below it is skipped (with a warning).
+	/// Returns how many layers were uploaded.
+	/// </summary>
+	int UploadLayers()
+	{
+		_activeLayers.Clear();
+		foreach ( var l in Layers )
+		{
+			if ( l is not null && l.Enabled && l.TopMeters > l.BottomMeters && l.Coverage > 0f && l.Density > 0f )
+				_activeLayers.Add( l );
+		}
+		_activeLayers.Sort( ( a, b ) => a.BottomMeters.CompareTo( b.BottomMeters ) );
+
+		int count = 0;
+		float prevTop = float.MinValue;
+		foreach ( var l in _activeLayers )
+		{
+			if ( count >= MaxLayers )
+				break;
+
+			if ( l.BottomMeters < prevTop )
+			{
+				if ( !_warnedOverlap )
+				{
+					Log.Warning( $"SkyCloudSystem: layer {l.BottomMeters}-{l.TopMeters} m overlaps the layer below it and is skipped. Layers must not overlap in altitude." );
+					_warnedOverlap = true;
+				}
+				continue;
+			}
+			prevTop = l.TopMeters;
+
+			_layerData[count++] = new CloudLayerGpu
+			{
+				Range = new Vector4( l.BottomMeters, l.TopMeters, l.Coverage, l.Density ),
+				Params = new Vector4( l.ShapeTilesPerKm / 1000f, l.WindOffset.x, l.WindOffset.y, l.DetailStrength ),
+				Noise = new Vector4( l.DetailTilesPerKm / 1000f, l.WeatherTilesPerKm / 1000f, l.WeatherInfluence, 0 ),
+				Shape = new Vector4( l.CloudType, l.HeightVariation, l.Anvil, 0 ),
+			};
+		}
+
+		// Unused slots are zeroed; the shader only reads the first 'count'.
+		for ( int i = count; i < MaxLayers; i++ )
+			_layerData[i] = default;
+
+		// API CHECK: GpuBuffer<T> as a StructuredBuffer attribute in a post process blit.
+		_layerBuffer ??= new GpuBuffer<CloudLayerGpu>( MaxLayers );
+		_layerBuffer.SetData( _layerData );
+		return count;
+	}
+
 	// ---- Update / render --------------------------------------------------
 
 	protected override void OnUpdate()
@@ -439,6 +536,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		Attributes.Set( "extinction", ExtinctionPerMeter );
 
 		// API CHECK: how to get the main camera's far clip from inside a post process.
+		// -USER: pretty sure theres a g_ attribute in the shader code to access the near and far plane of the camera (g_flFarPlane).
 		float zFar = Scene?.Camera?.ZFar ?? 10000f;
 		Attributes.Set( "far_distance", zFar * InchToMeter );
 
@@ -454,27 +552,10 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		Attributes.Set( "DetailNoise", _detailNoise );
 		Attributes.Set( "WeatherMap", _weatherMap );
 
-		// --- Layers: packed into float4s (avoids relying on array attributes) ---
-		for ( int i = 0; i < MaxLayers; i++ )
-		{
-			CloudLayerSettings l = i < Layers.Count ? Layers[i] : null;
-			bool active = l is not null && l.Enabled && l.TopMeters > l.BottomMeters;
-
-			// range:  x = bottom (m), y = top (m), z = coverage, w = density
-			Attributes.Set( $"layer{i}_range", active
-				? new Vector4( l.BottomMeters, l.TopMeters, l.Coverage, l.Density )
-				: new Vector4( 0, 0, 0, 0 ) );
-
-			// params: x = shape freq (1/m), y/z = wind offset (m), w = detail strength
-			Attributes.Set( $"layer{i}_params", active
-				? new Vector4( l.ShapeTilesPerKm / 1000f, l.WindOffset.x, l.WindOffset.y, l.DetailStrength )
-				: new Vector4( 1, 0, 0, 0 ) );
-
-			// noise:  x = detail freq (1/m), y = weather freq (1/m), z = weather influence, w = reserved
-			Attributes.Set( $"layer{i}_noise", active
-				? new Vector4( l.DetailTilesPerKm / 1000f, l.WeatherTilesPerKm / 1000f, l.WeatherInfluence, 0 )
-				: new Vector4( 1, 1, 0, 0 ) );
-		}
+		// --- Layers: one structured buffer + count ---
+		int layerCount = UploadLayers();
+		Attributes.Set( "CloudLayers", _layerBuffer );
+		Attributes.Set( "layer_count", (float)layerCount );
 
 		var shader = _material;
 		var blit = BlitMode.WithBackbuffer( shader, Stage.AfterPostProcess, 200, false );

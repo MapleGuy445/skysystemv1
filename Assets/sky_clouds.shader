@@ -73,21 +73,12 @@ PS
     float sky_steps    < Attribute("sky_steps"); > ;
     float debug_mode   < Attribute("debug_mode"); > ;
 
-    // x = bottom, y = top, z = coverage, w = density
-    float4 layer0_range  < Attribute("layer0_range"); > ;
-    float4 layer1_range  < Attribute("layer1_range"); > ;
-    float4 layer2_range  < Attribute("layer2_range"); > ;
-    // x = shape freq (1/m), y/z = wind offset (m), w = detail strength
-    float4 layer0_params < Attribute("layer0_params"); > ;
-    float4 layer1_params < Attribute("layer1_params"); > ;
-    float4 layer2_params < Attribute("layer2_params"); > ;
-
     static const float INCH_TO_M  = 0.0254;
-    static const int   MAX_LAYERS = 3;
+    static const int   MAX_LAYERS = 8;   // must match SkyCloudSystem.MaxLayers
     static const int   MAX_STEPS  = 128;
     static const float PI_F       = 3.14159265;
 
-    // Cloud density (declares the noise textures and layerN_noise attributes).
+    // Cloud density (declares the noise textures and the CloudLayers buffer).
     #include "cloud_density.hlsl"
 
     // ------------------------------------------------------------------
@@ -374,10 +365,12 @@ PS
 
     // Light reaching a point inside a cloud: sun-ward light march, multi-scatter
     // approximation, powder term, plus height-graded ambient.
-    float3 CloudLighting(float3 pos, float4 range, float4 prm, float4 nz,
+    float3 CloudLighting(float3 pos, CloudLayer L,
                          float hFrac, float cosSun, float localDens, int lightSteps)
     {
-        float thickness = max(range.y - range.x, 1.0);
+        // Capped so a tall convective layer does not make the light march too
+        // coarse for the small clouds at its bottom.
+        float thickness = clamp(L.range.y - L.range.x, 1.0, 3000.0);
 
         // Low sun means the light path crosses the slab at a shallow angle, so
         // stretch the steps to still reach the cloud edge.
@@ -391,7 +384,7 @@ PS
             if (k >= lightSteps) break;
             float dl = baseStep * (1.0 + k); // steps grow with distance
             float3 lp = pos + sun_dir * (dist + 0.5 * dl);
-            tau += SampleDensityLight(lp, range, prm, nz) * extinction * dl;
+            tau += SampleDensityLight(lp, L) * extinction * dl;
             dist += dl;
         }
 
@@ -460,42 +453,32 @@ PS
             bg = lerp(color.rgb, color.rgb * Ta + insATM, aerial_strength);
         }
 
-        // ---- Per-layer march intervals ----
-        float4 R[MAX_LAYERS];
-        float4 P[MAX_LAYERS];
-        float4 N[MAX_LAYERS];
-        R[0] = layer0_range;  R[1] = layer1_range;  R[2] = layer2_range;
-        P[0] = layer0_params; P[1] = layer1_params; P[2] = layer2_params;
-        N[0] = layer0_noise;  N[1] = layer1_noise;  N[2] = layer2_noise;
-
-        float2 iv[MAX_LAYERS];
-        float3 dbg = float3(0.0, 0.0, 0.0);
-
-        [unroll] for (int k = 0; k < MAX_LAYERS; k++)
-        {
-            bool valid = R[k].y > R[k].x && R[k].w > 0.0 && R[k].z > 0.0;
-            iv[k] = valid
-                ? SlabInterval(ro.z, rd.z, ground_z + R[k].x, ground_z + R[k].y, maxT)
-                : float2(-1.0, -1.0);
-
-            if (iv[k].y > iv[k].x)
-                dbg[k] = saturate((iv[k].y - iv[k].x) / 4000.0) * 0.8 + 0.2;
-        }
+        // ---- Layers ----
+        // C# uploads only active layers, sorted by altitude (lowest first). Since
+        // slabs do not overlap, walking them upward for rising rays and downward
+        // for falling rays visits them in entry order: no per-pixel sort needed.
+        // Layers behind the ray (e.g. below the camera on a rising ray) simply
+        // produce an empty interval.
+        int layerCount = clamp((int)layer_count, 0, MAX_LAYERS);
+        bool rising = rd.z >= 0.0;
 
         if (debug_mode > 0.5 && debug_mode < 1.5)
+        {
+            // R/G/B cycle through layers by index (lowest layer = red).
+            float3 dbg = float3(0.0, 0.0, 0.0);
+            [loop] for (int k = 0; k < layerCount; k++)
+            {
+                CloudLayer Lk = CloudLayers[k];
+                float2 ivk = SlabInterval(ro.z, rd.z, ground_z + Lk.range.x, ground_z + Lk.range.y, maxT);
+                if (ivk.y > ivk.x)
+                {
+                    int c = k - (k / 3) * 3;
+                    float3 tint = c == 0 ? float3(1.0, 0.0, 0.0) : (c == 1 ? float3(0.0, 1.0, 0.0) : float3(0.0, 0.0, 1.0));
+                    dbg += tint * (saturate((ivk.y - ivk.x) / 4000.0) * 0.8 + 0.2);
+                }
+            }
             return float4(bg * 0.3 + dbg, 1.0);
-
-        // ---- Sort layers by entry distance (invalid last) ----
-        int order[MAX_LAYERS];
-        order[0] = 0; order[1] = 1; order[2] = 2;
-        float key[MAX_LAYERS];
-        [unroll] for (int a = 0; a < MAX_LAYERS; a++)
-            key[a] = (iv[a].y > iv[a].x) ? iv[a].x : 1000000000.0;
-
-        // 3-element sorting network: (0,1) (1,2) (0,1)
-        if (key[order[0]] > key[order[1]]) { int t = order[0]; order[0] = order[1]; order[1] = t; }
-        if (key[order[1]] > key[order[2]]) { int t = order[1]; order[1] = order[2]; order[2] = t; }
-        if (key[order[0]] > key[order[1]]) { int t = order[0]; order[0] = order[1]; order[1] = t; }
+        }
 
         // ---- March, front to back, one shared transmittance ----
         int steps = clamp((int)step_count, 1, MAX_STEPS);
@@ -509,14 +492,16 @@ PS
         float weightSum = 0.0;
         float distSum = 0.0;
 
-        [loop] for (int s = 0; s < MAX_LAYERS; s++)
+        [loop] for (int s = 0; s < layerCount; s++)
         {
-            int layer = order[s];
-            float2 t = iv[layer];
+            CloudLayer L = CloudLayers[rising ? s : layerCount - 1 - s];
+            if (!(L.range.y > L.range.x && L.range.w > 0.0 && L.range.z > 0.0)) continue;
+
+            float2 t = SlabInterval(ro.z, rd.z, ground_z + L.range.x, ground_z + L.range.y, maxT);
             if (t.y <= t.x) continue;
 
             float D = t.y - t.x;
-            float thickness = R[layer].y - R[layer].x;
+            float thickness = L.range.y - L.range.x;
 
             // Uniform steps for rays that cross the slab; steps bunch up near
             // the camera for long near-horizontal rays (exponent 1 -> 2).
@@ -535,7 +520,8 @@ PS
 
                 float3 pos = ro + rd * tS;
                 float detailW = 1.0 - smoothstep(8000.0, 16000.0, tS);
-                float dens = SampleDensity(pos, R[layer], P[layer], N[layer], detailW);
+                float hCloud;
+                float dens = SampleDensity(pos, L, detailW, hCloud);
 
                 // Fade toward the distance cap so the cutoff is invisible.
                 dens *= 1.0 - smoothstep(0.6 * max_cloud_distance, max_cloud_distance, tS);
@@ -549,8 +535,9 @@ PS
                     // Skip the (expensive) light march for negligible contributions.
                     if (w > 0.0005)
                     {
-                        float hFrac = saturate((pos.z - ground_z - R[layer].x) / thickness);
-                        float3 lighting = CloudLighting(pos, R[layer], P[layer], N[layer], hFrac, cosSun, dens, lightSteps);
+                        // Ambient gradient over the cloud's own height, so a small
+                        // puff in a tall layer still gets a bright top.
+                        float3 lighting = CloudLighting(pos, L, hCloud, cosSun, dens, lightSteps);
 
                         scatter += w * lighting;
                         weightSum += w;

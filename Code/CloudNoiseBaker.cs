@@ -23,6 +23,7 @@ using System;
 
 public static class CloudNoiseBaker
 {
+	// -USER: Could we make the calculation in parallel on the gpu instead? Not sure if its worth the data passing to the gpu instead of doing it in parallel on the cpu.
 	public static bool UseParallel = true;
 
 	// ------------------------------------------------------------------ hashing
