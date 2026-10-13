@@ -24,6 +24,14 @@ public enum CloudQuality
 	Ultra
 }
 
+/// <summary>Resolution the clouds are marched at (divisor per axis). Full = the old per-pixel path in the blit.</summary>
+public enum CloudResolution
+{
+	Full = 1,
+	Half = 2,
+	Quarter = 4
+}
+
 public enum CloudDebugView
 {
 	Off = 0,
@@ -195,6 +203,15 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	[Property, Group( "Sky" ), Range( 0, 1 )] public float AerialPerspective { get; set; } = 1f;
 	[Property, Group( "Sky" )] public Color GroundAlbedo { get; set; } = new Color( 0.25f, 0.25f, 0.22f );
 	[Property, Group( "Sky" ), Range( 0, 4 )] public float StarBrightness { get; set; } = 1f;
+
+	/// <summary>Multiplier on how many stars there are (all three star layers).</summary>
+	[Property, Group( "Sky" ), Range( 0.25f, 4 )] public float StarDensity { get; set; } = 1f;
+
+	/// <summary>Star size in pixels (1 = point-like, about one pixel wide at any resolution).</summary>
+	[Property, Group( "Sky" ), Range( 0.5f, 3 )] public float StarSize { get; set; } = 1f;
+
+	/// <summary>Brightness of the Milky Way band, its dust lanes and nebulae.</summary>
+	[Property, Group( "Sky" ), Range( 0, 4 )] public float MilkyWayBrightness { get; set; } = 1f;
 	[Property, Group( "Sky" ), Range( 0.1f, 3 )] public float SunDiskDegrees { get; set; } = 0.8f;
 	[Property, Group( "Sky" ), Range( 0.1f, 5 )] public float MoonDiskDegrees { get; set; } = 1.2f;
 
@@ -205,6 +222,9 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 
 	[Property, Group( "Quality" )] public CloudQuality Quality { get; set; } = CloudQuality.High;
 	[Property, Group( "Quality" ), Range( 5, 200 )] public float MaxCloudDistanceKm { get; set; } = 40f;
+
+	/// <summary>Half = clouds marched at half width and height (1/4 of the pixels) in a compute pass, then upsampled.</summary>
+	[Property, Group( "Quality" )] public CloudResolution Resolution { get; set; } = CloudResolution.Half;
 
 	// ---- World ------------------------------------------------------------
 
@@ -305,6 +325,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		DisposeNoise();
 		_layerBuffer?.Dispose();
 		_layerBuffer = null;
+		DisposeTrace();
 	}
 
 	void DisposeNoise()
@@ -482,6 +503,93 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		return count;
 	}
 
+	// ---- Reduced-resolution cloud trace (Phase 5) --------------------------
+	//
+	// A compute pass (cloud_trace_cs) marches the clouds at 1/2 or 1/4
+	// resolution into CloudTex; the full-screen blit upsamples and composites.
+	// The compute pass is recorded in its own command list, inserted just before
+	// the blit, so every shared attribute is set on both (see SetShared overloads).
+	//
+	// API CHECK: CommandList.Attributes.Set for Texture (3D), GpuBuffer and
+	// Vector2/3/4 (float and 2D Texture confirmed by the Phase 5 spike).
+
+	ComputeShader _traceCs;
+	CommandList _traceCl;
+	Texture _cloudTex;
+	int _cloudW, _cloudH;
+
+	void SetShared( string name, float v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
+	void SetShared( string name, Vector3 v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
+	void SetShared( string name, Vector4 v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
+	void SetShared( string name, Texture v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
+	void SetShared( string name, GpuBuffer<CloudLayerGpu> v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
+
+	/// <summary>Records the trace dispatch (all shared attributes must already be set).</summary>
+	void RecordTrace()
+	{
+		int div = (int)Resolution;
+		int w = Math.Max( 1, (int)MathF.Ceiling( Screen.Size.x / div ) );
+		int h = Math.Max( 1, (int)MathF.Ceiling( Screen.Size.y / div ) );
+
+		if ( _cloudTex is null || w != _cloudW || h != _cloudH )
+		{
+			_cloudTex?.Dispose();
+			_cloudTex = CreateUavTexture( "cloud_trace", w, h );
+			_cloudW = w;
+			_cloudH = h;
+		}
+
+		_traceCs ??= new ComputeShader( "cloud_trace_cs" );
+
+		_traceCl.Attributes.Set( "CloudOut", _cloudTex );
+		_traceCl.Attributes.Set( "cloud_size", new Vector2( w, h ) );
+		_traceCl.DispatchCompute( _traceCs, w, h, 1 );
+
+		Attributes.Set( "CloudTex", _cloudTex );
+	}
+
+	// ---- Sky-view LUT (Phase 5) ---------------------------------------------
+	//
+	// sky_lut_cs renders the smooth sky (no sun disk, moon or stars) into a small
+	// direction-indexed texture each frame; the blit samples it per pixel
+	// instead of marching the atmosphere. Recorded in the same command list.
+
+	const int SkyLutWidth = 320;
+	const int SkyLutHeight = 192;
+
+	ComputeShader _skyLutCs;
+	Texture _skyLut, _skyLutTrans;
+
+	void RecordSkyLut()
+	{
+		_skyLut ??= CreateUavTexture( "sky_lut", SkyLutWidth, SkyLutHeight );
+		_skyLutTrans ??= CreateUavTexture( "sky_lut_trans", SkyLutWidth, SkyLutHeight );
+		_skyLutCs ??= new ComputeShader( "sky_lut_cs" );
+
+		_traceCl.Attributes.Set( "SkyLutOut", _skyLut );
+		_traceCl.Attributes.Set( "SkyLutTrans", _skyLutTrans );
+		_traceCl.Attributes.Set( "sky_lut_size", new Vector2( SkyLutWidth, SkyLutHeight ) );
+		_traceCl.DispatchCompute( _skyLutCs, SkyLutWidth, SkyLutHeight, 1 );
+
+		Attributes.Set( "SkyLut", _skyLut );
+		Attributes.Set( "SkyLutTrans", _skyLutTrans );
+	}
+
+	static Texture CreateUavTexture( string name, int w, int h ) =>
+		Texture.Create( w, h, ImageFormat.RGBA16161616F )
+			.WithName( name )
+			.WithUAVBinding()
+			.WithGPUOnlyUsage()
+			.Finish();
+
+	void DisposeTrace()
+	{
+		_cloudTex?.Dispose();
+		_skyLut?.Dispose();
+		_skyLutTrans?.Dispose();
+		_cloudTex = _skyLut = _skyLutTrans = null;
+	}
+
 	// ---- Update / render --------------------------------------------------
 
 	protected override void OnUpdate()
@@ -510,52 +618,66 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 
 		_material ??= Material.FromShader( "sky_clouds.shader" );
 
+		_traceCl ??= new CommandList( "CloudTrace" );
+		_traceCl.Reset();
+
 		// --- Sun / moon ---
-		Attributes.Set( "sun_dir", _sunDir );
-		Attributes.Set( "sun_color", _sunLight );
-		Attributes.Set( "ambient_top", _ambientTop );
-		Attributes.Set( "ambient_bottom", _ambientBottom );
-		Attributes.Set( "sun_disk_cos", MathF.Cos( SunDiskDegrees * MathF.PI / 180f ) );
-		Attributes.Set( "moon_dir", _moonDir );
-		Attributes.Set( "moon_disk_cos", MathF.Cos( MoonDiskDegrees * MathF.PI / 180f ) );
+		SetShared( "sun_dir", _sunDir );
+		SetShared( "sun_color", _sunLight );
+		SetShared( "ambient_top", _ambientTop );
+		SetShared( "ambient_bottom", _ambientBottom );
+		SetShared( "sun_disk_cos", MathF.Cos( SunDiskDegrees * MathF.PI / 180f ) );
+		SetShared( "moon_dir", _moonDir );
+		SetShared( "moon_disk_cos", MathF.Cos( MoonDiskDegrees * MathF.PI / 180f ) );
 
 		// --- Sky ---
-		Attributes.Set( "sky_enabled", ReplaceSky ? 1f : 0f );
-		Attributes.Set( "sky_sun_intensity", SkySunIntensity );
-		Attributes.Set( "sky_exposure", SkyExposure );
-		Attributes.Set( "cloud_exposure", CloudExposure );
-		Attributes.Set( "aerial_strength", AerialPerspective );
-		Attributes.Set( "ground_albedo", Rgb( GroundAlbedo ) );
-		Attributes.Set( "star_brightness", StarBrightness );
-		Attributes.Set( "star_angle", TimeOfDay / 24f * MathF.PI * 2f );
-		Attributes.Set( "horizon_fade", MathF.Sin( HorizonFadeDegrees * MathF.PI / 180f ) );
+		SetShared( "sky_enabled", ReplaceSky ? 1f : 0f );
+		SetShared( "sky_sun_intensity", SkySunIntensity );
+		SetShared( "sky_exposure", SkyExposure );
+		SetShared( "cloud_exposure", CloudExposure );
+		SetShared( "aerial_strength", AerialPerspective );
+		SetShared( "ground_albedo", Rgb( GroundAlbedo ) );
+		SetShared( "star_brightness", StarBrightness );
+		Attributes.Set( "star_density", StarDensity );
+		Attributes.Set( "star_size", StarSize );
+		Attributes.Set( "milky_way", MilkyWayBrightness );
+		SetShared( "star_angle", TimeOfDay / 24f * MathF.PI * 2f );
+		SetShared( "horizon_fade", MathF.Sin( HorizonFadeDegrees * MathF.PI / 180f ) );
 
 		// --- World / limits (all in meters) ---
-		Attributes.Set( "ground_z", GroundLevel * InchToMeter );
-		Attributes.Set( "max_cloud_distance", MaxCloudDistanceKm * 1000f );
-		Attributes.Set( "extinction", ExtinctionPerMeter );
+		SetShared( "ground_z", GroundLevel * InchToMeter );
+		SetShared( "max_cloud_distance", MaxCloudDistanceKm * 1000f );
+		SetShared( "extinction", ExtinctionPerMeter );
 
-		// API CHECK: how to get the main camera's far clip from inside a post process.
-		// -USER: pretty sure theres a g_ attribute in the shader code to access the near and far plane of the camera (g_flFarPlane).
-		float zFar = Scene?.Camera?.ZFar ?? 10000f;
-		Attributes.Set( "far_distance", zFar * InchToMeter );
+		// (The camera far plane comes from the engine's g_flFarPlane in the shader.)
 
 		// --- Quality / debug ---
-		Attributes.Set( "step_count", (float)StepsFor( Quality ) );
-		Attributes.Set( "light_steps", (float)LightStepsFor( Quality ) );
-		Attributes.Set( "sky_steps", (float)SkyStepsFor( Quality ) );
-		Attributes.Set( "debug_mode", (float)(int)DebugView );
+		SetShared( "step_count", (float)StepsFor( Quality ) );
+		SetShared( "light_steps", (float)LightStepsFor( Quality ) );
+		SetShared( "sky_steps", (float)SkyStepsFor( Quality ) );
+		SetShared( "debug_mode", (float)(int)DebugView );
 
 		// --- Baked noise ---
 		// API CHECK: Attributes.Set( string, Texture ) for 2D and 3D textures.
-		Attributes.Set( "ShapeNoise", _shapeNoise );
-		Attributes.Set( "DetailNoise", _detailNoise );
-		Attributes.Set( "WeatherMap", _weatherMap );
+		SetShared( "ShapeNoise", _shapeNoise );
+		SetShared( "DetailNoise", _detailNoise );
+		SetShared( "WeatherMap", _weatherMap );
 
 		// --- Layers: one structured buffer + count ---
 		int layerCount = UploadLayers();
-		Attributes.Set( "CloudLayers", _layerBuffer );
-		Attributes.Set( "layer_count", (float)layerCount );
+		SetShared( "CloudLayers", _layerBuffer );
+		SetShared( "layer_count", (float)layerCount );
+
+		// --- Compute passes, recorded in one command list that runs before the blit ---
+		bool lowRes = Resolution != CloudResolution.Full;
+		Attributes.Set( "cloud_lowres", lowRes ? 1f : 0f );
+
+		if ( ReplaceSky )
+			RecordSkyLut();
+		if ( lowRes )
+			RecordTrace();
+		if ( ReplaceSky || lowRes )
+			InsertCommandList( _traceCl, Stage.AfterPostProcess, 199, "cloud_compute" );
 
 		var shader = _material;
 		var blit = BlitMode.WithBackbuffer( shader, Stage.AfterPostProcess, 200, false );

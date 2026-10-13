@@ -27,5 +27,4 @@ code/Properties/*
 
 # Exported / standalone games
 Exports/
-Assets/sky_clouds.shader_c
 *.shader_c

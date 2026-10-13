@@ -3,7 +3,7 @@
 Handoff document for continuing this work in Claude Code. It records the goal, decisions, current state, remaining phases and the gotchas found so far.
 
 **Engine:** s&box. **Language:** C# component plus an HLSL post-process shader.
-**Last updated:** 2026-10-12.
+**Last updated:** 2026-10-13.
 
 ---
 
@@ -27,7 +27,7 @@ A spherical real-scale planet was considered first, then **deliberately deferred
 
 ## 2. Environment and API notes (read first)
 
-I (the previous assistant) could not run or compile any code. **Everything below the "verified" line in section 4 is unverified.** Spots that depend on unverified s&box APIs are marked `API CHECK` in the code.
+The assistant cannot run the engine; the user builds and reports back (the assistant can read `T:/SteamLibrary/steamapps/common/sbox/logs/sbox-dev.log` and the API XML docs in `bin/managed/*.xml`). Spots that depend on unverified s&box APIs are marked `API CHECK` in the code.
 
 ### s&box API whitelist
 s&box compiles user code with a **whitelist**. `System.Threading.Tasks.Parallel` is **blocked**. Use `Sandbox.Utility.Parallel.For( int, int, Action<int> )` instead. If new code fails with `SB1000`, check the whitelist docs:
@@ -39,20 +39,15 @@ s&box compiles user code with a **whitelist**. `System.Threading.Tasks.Parallel`
 - `Attributes.Set( "name", value )` works for float, Vector3 and Vector4. Texture binding via the same call is assumed.
 - Post process component: `BasePostProcess<T>`, drawn with `Blit( BlitMode.WithBackbuffer( material, Stage.AfterPostProcess, 200, false ), "name" )`.
 - `Scene.Camera.ZFar` compiled and worked.
+- Confirmed by the working system (2026-10-13): `ImageFormat.RGBA8888`; 2D `Texture.Create(...).WithData(...)`; `Attributes.Set( name, Texture )` for 2D and 3D; the `SamplerState` attribute syntax; `Depth::GetWorldPosition` on sky pixels; `DirectionalLight.LightColor`, `AmbientLight.Color`, `Rotation.LookAt( Vector3 )`; `[Group]`; `GpuBuffer<T>` bound with `Attributes.Set` as a `StructuredBuffer<T>` in a post-process blit.
 
 ### Still unverified (`API CHECK` markers)
 | Item | Where |
 |---|---|
-| `ImageFormat.RGBA8888` enum name | `CloudNoiseBaker.cs` |
-| 2D `Texture.Create(...).WithData(...)` | `CloudNoiseBaker.cs` |
-| `Attributes.Set( name, Texture )` for 2D and 3D | `SkyCloudSystem.cs` |
-| `SamplerState` attribute syntax `Filter( MIN_MAG_MIP_LINEAR ); AddressU/V/W( WRAP )` | `cloud_density.hlsl` |
-| `Depth::GetWorldPosition` on far-plane (sky) pixels | `sky_clouds.shader` |
-| `DirectionalLight.LightColor`, `AmbientLight.Color`, `Rotation.LookAt( Vector3 )` | `SkyCloudSystem.cs` |
-| `[Group( "..." )]` inspector attribute | `SkyCloudSystem.cs` |
 | Whether `Stage.AfterPostProcess` runs before or after engine tone mapping | affects all exposure tuning |
-| `Sandbox.Utility.Parallel.For` return value meaning (ignored by the baker) | `CloudNoiseBaker.cs` |
-| `GpuBuffer<T>` bound via `Attributes.Set` as a `StructuredBuffer` in a post-process blit (API exists; engine tools use it with compute shaders) | `SkyCloudSystem.cs` / `cloud_density.hlsl` |
+| `Sandbox.Utility.Parallel.For` return value meaning (ignored by the baker) | `CloudBenchmark.cs` | Phase 5 measurement: pins the camera, freezes time and wind, runs Off/Low/Medium/High/Ultra and logs GPU frame time per tier (cloud cost = tier minus Off). |
+| `CloudNoiseBaker.cs` |
+| `PerformanceStats.GpuFrametime` / `GpuFrameNumber` (static), `Screen.Size` | `CloudBenchmark.cs` |
 
 ### Units
 - s&box world units are **inches**; 1 unit = 0.0254 m.
@@ -68,8 +63,11 @@ s&box compiles user code with a **whitelist**. `System.Threading.Tasks.Parallel`
 | File | Role |
 |---|---|
 | `SkyCloudSystem.cs` | Component (`BasePostProcess<SkyCloudSystem>`). Owns settings, quality tiers, time of day and sun driving, CPU atmosphere (sun tint), ambient colors, scene light sync, wind accumulation, noise baking lifecycle, and all shader attributes. Also contains `CloudLayerSettings`, `CloudQuality`, `CloudDebugView`, `AtmosphereCpu`. |
+| `CloudBenchmark.cs` | Phase 5 measurement: pins the camera, freezes time and wind, runs Off/Low/Medium/High/Ultra and logs GPU frame time per tier (cloud cost = tier minus Off). |
 | `CloudNoiseBaker.cs` | CPU baker for tileable noise: shape 3D (RGBA8: R Perlin-Worley, GBA Worley fBm), detail 3D (RGB Worley fBm), weather 2D (R coverage, G regional cloud height: where towers cluster). Uses `Sandbox.Utility.Parallel.For`. |
-| `sky_clouds.shader` | Full-screen post-process: atmosphere (single scatter), sun/moon/stars, aerial perspective, slab intersection, layer sorting, cloud view march, cloud light march, composition. |
+| `sky_clouds.shader` | Full-screen post-process: sky (atmosphere, sun/moon/stars, below-horizon), aerial perspective on geometry, and the composite. Clouds come from `CloudTex` (bilinear upsample) or, with `Resolution = Full`, from `MarchClouds` per pixel. |
+| `cloud_common.hlsl` | Shared by the blit and the trace compute pass: all attributes, constants, `CloudRay`/`MakeCloudRay`, atmosphere functions, cloud lighting, `CloudLayerIntervals` (debug) and `MarchClouds` (returns premultiplied cloud colour + transmittance). |
+| `cloud_trace_cs.shader` | Phase 5 compute pass: `MarchClouds` per low-res texel into `CloudTex` (RGBA16F). |
 | `cloud_density.hlsl` | Included inside the shader's `PS` block. Declares noise textures, sampler, the `CloudLayer` struct and the `CloudLayers` buffer. Provides `CloudTypeProfile`, `BaseCloudDensity` (per-cloud top + type profile + anvil), `SampleDensityLight` (no detail), `SampleDensity` (full). |
 
 ### Core design decisions
@@ -105,7 +103,7 @@ s&box compiles user code with a **whitelist**. `System.Threading.Tasks.Parallel`
 - Direct sun color is the atmosphere-tinted color, so sunsets color the clouds automatically.
 
 ### Shader attribute contract (names must match C# and HLSL)
-`sun_dir, sun_color, ambient_top, ambient_bottom, sun_disk_cos, moon_dir, moon_disk_cos, sky_enabled, sky_sun_intensity, sky_exposure, cloud_exposure, aerial_strength, ground_albedo, star_brightness, star_angle, horizon_fade, ground_z, max_cloud_distance, far_distance, extinction, step_count, light_steps, sky_steps, debug_mode, CloudLayers, layer_count, ShapeNoise, DetailNoise, WeatherMap`
+`sun_dir, sun_color, ambient_top, ambient_bottom, sun_disk_cos, moon_dir, moon_disk_cos, sky_enabled, sky_sun_intensity, sky_exposure, cloud_exposure, aerial_strength, ground_albedo, star_brightness, star_angle, horizon_fade, ground_z, max_cloud_distance, extinction, step_count, light_steps, sky_steps, debug_mode, CloudLayers, layer_count, ShapeNoise, DetailNoise, WeatherMap`; blit only: `CloudTex, cloud_lowres, SkyLut, SkyLutTrans, star_density, milky_way`; compute only: `CloudOut, cloud_size, SkyLutOut, SkyLutTrans, sky_lut_size`. The camera far plane comes from the engine's `g_flFarPlane`.
 
 ### Debug views (`CloudDebugView`)
 - `LayerIntervals`: R/G/B show each layer's march interval (verified working).
@@ -121,19 +119,64 @@ s&box compiles user code with a **whitelist**. `System.Threading.Tasks.Parallel`
 | 0. API spikes | Partial | See section 2. Many items still unverified. |
 | 1. Foundation (slabs, sky-pixel path, layers) | **Verified** | Debug intervals correct from below, inside and above. Clouds occluded properly by geometry. |
 | 2. Baked noise | **Verified (compiles and renders)** | Tiling acceptable. Bake time 256 ms (Medium) and ~1.7 s (Ultra), synchronous. |
-| 2b. Shape tuning | In progress | Defaults reduced after clouds looked too thick, blobby and sheet-like. Detail erosion formula changed after high strength "decimated" clouds; user has not yet confirmed the fix. |
-| 3. Sky | **Compiles and renders; visuals not yet signed off** | Atmosphere, sun/moon disks, stars, aerial perspective, time of day, scene light sync. Scene light sync confirmed (sun rotation/colour and AmbientLight colour are written). |
-| 4. Cloud lighting | **Compiles and renders; visuals not yet signed off** | Light march, multi-scatter, powder, ambient. |
-| 5-9 | Not started | See section 5. |
+| 2b. Shape tuning | Superseded | Folded into the vertical-structure work; final shape tuning by eye later. |
+| 3. Sky | **Done (user sign-off 2026-10-13)** | Horizon noise and below-horizon gray fixed (stable `GroundDistance`, quadratic atmosphere steps, horizon haze fade). |
+| 4. Cloud lighting | **Done (user sign-off 2026-10-13)** | |
+| 5. Performance | **In progress** | Baseline measurement via `CloudBenchmark`. Already done: non-uniform atmosphere steps, steps bunched near the camera on long cloud rays, detail fade with distance. |
+| 6. Layers and weather | Partly done | Vertical structure (per-cloud tops, cloud type, anvil) and `StructuredBuffer` layers done and verified (needed some settings tuning). Rest open. |
+| 7-9 | Not started | See section 5. |
 
 The user's last reported state before Phase 3/4: tiling not bad; clouds too blobby and thick; wanted individual clouds, not a full-sky layer. Flat placeholder lighting was identified as part of the "blobby" look.
 
-### First steps for the next session
-1. Build. Fix any compile errors from the unverified APIs (section 2).
-2. Use the `SkyMask` debug view to confirm sky classification.
-3. Step `TimeOfDay` through 10, 18, 21, 2 and judge: sky color, sunset, stars, brightness balance vs. terrain (tone mapping assumption), cloud lighting.
-4. Fly below, inside and above each layer and check lighting from every side.
-5. Re-tune cloud shapes (see section 7) now that lighting can show depth.
+### Phase 5 baseline (2026-10-13)
+Pose `(10524.2, -379.7, 2456.3)`, angles `(-14.5, 0, 0)` (looking ~14.5° up, toward the horizon), 10:00, 2 layers (tall convective + mid deck), 2052x914 (~1.9 MP). Off = 1.19 ms GPU.
+
+| Tier | GPU median | Cost of the system | p95 |
+|---|---|---|---|
+| Low | 2.62 ms | 1.43 ms | 2.72 |
+| Medium | 3.50 ms | 2.30 ms | 3.56 |
+| High | 5.28 ms | 4.09 ms | 5.85 |
+| Ultra | 7.10 ms | 5.90 ms | 7.66 |
+
+Breakdown at High (same pose): sky only 1.17 ms, no aerial 3.91 ms, clouds only (our sky and aerial off) 3.24 ms. Sky + clouds-only exceed the full cost by ~0.3 ms, which is the shared fixed overhead (backbuffer copy + full-screen pass). Estimated split of High's 4.1 ms: **clouds ~2.9 ms (~70%)**, sky ~0.85 ms, aerial perspective ~0.2 ms, fixed ~0.3 ms. So reduced-resolution clouds plus temporal accumulation come first; the sky is second.
+
+Runs repeat within ~0.1 ms. Tilting toward the horizon barely changed the cost, which points at fixed per-pixel work (sky atmosphere march, aerial perspective) rather than cloud coverage. Target: ~1 to 2 ms at High at this resolution.
+
+### Phase 5 API findings (2026-10-13)
+**Spike verified by the user:** compute dispatched from the post process's `CommandList` (`new CommandList(name)`, `Reset()`, `Attributes.Set`, `DispatchCompute( cs, w, h, 1 )` with thread counts, `InsertCommandList(..., Stage.AfterPostProcess, 199, ...)`), persistent `Texture.Create(...).WithUAVBinding().WithGPUOnlyUsage()` RGBA16F textures written as `RWTexture2D` and read next frame, ping-pong history, and `ReprojectFromLastFrameSs` (history calmer, grid locked while turning). No manual barriers were needed.
+- Reduced-resolution targets: `CommandList.GetRenderTarget( name, sizeFactor, colorFormat, depthFormat, msaa, mips )` (sizeFactor 2 = half screen); release with `ReleaseRenderTarget`. Post process adds a command list with `BasePostProcess.InsertCommandList( cl, stage, order, name )`.
+- Compute: `CommandList.DispatchCompute( ComputeShader, RenderTargetHandle.SizeHandle )` or `( cs, x, y, z )`; `UavBarrier(...)`, `ResourceBarrierTransition(...)`.
+- Persistent history textures: `Texture.CreateRenderTarget().WithFormat(...).WithUAVBinding().Create()` or `Texture.CreateRenderTarget( name, format, size, oldTexture )` (recreates on resize). Ping-pong two of them like the engine SSR (`core/shaders/screen_space_reflections_cs.shader`, `PingIs0`).
+- Reprojection: `core/shaders/common/classes/Motion.hlsl` -> `ReprojectFromLastFrameSs( worldPos )` (camera motion only), plus a generic `Motion::TemporalFilter` (3x3 clamp TAA) to crib from. So previous-frame matrices are provided by the engine.
+- Blue noise: `core/textures/dev/blue_noise_256.vtex` ships with the engine (SSR uses a `BlueNoiseIndex`).
+- Timing: `Sandbox.Diagnostics.PerformanceStats.GpuFrametime` works (used by `CloudBenchmark`). `GpuProfilerStats` has per-scope GPU timings (not yet tried).
+
+### Proposed Phase 5 architecture
+1. **Trace pass** (compute, 1/2 res on High/Ultra, 1/4 area on Low/Medium): clouds plus the smooth part of the sky (no sun disk, no stars) into an RGBA16F target (rgb radiance, a transmittance) and an R32F cloud depth (transmittance-weighted distance). Jitter = blue noise + frame index.
+2. **Temporal pass** (compute): reproject the history with the cloud depth, 3x3 neighborhood clamp, blend ~0.9; reject harder within ~1 km of the camera; ping-pong two persistent textures.
+3. **Composite** (the existing full-res blit, made cheap): depth-aware upsample of the cloud/sky buffer, add sun disk, moon and stars at full res, composite over the scene.
+4. Then: empty-space skipping, aerial perspective on geometry moved off the per-pixel march (low-res or a small froxel/LUT), optional sky-view texture.
+
+### Phase 5 progress
+- **Step A done (2026-10-13):** clouds marched at reduced resolution by `cloud_trace_cs` (`Resolution` = Half default / Quarter / Full), bilinear upsample in the blit. All shared attributes are set on both the blit and the trace command list (`SetShared`). Same pose, 2052x914:
+
+  | High | Full | Half |
+  |---|---|---|
+  | Total cost | 4.10 ms | **2.00 ms** |
+  | Clouds only (incl. ~0.3 ms fixed) | 3.25 ms | 0.88 ms (clouds ~2.95 -> ~0.58 ms, ~5x) |
+  | Sky only | 1.16 ms | 1.14 ms |
+
+  Half, all tiers: Low 0.86, Medium 1.28, High 2.00, Ultra 2.85 ms. **The full-res sky (~0.85 ms) is now the largest cost at High.**
+- Benchmark note: `Screen.Size` read at play start can be stale (logged 1024x1024 for a 2052x914 run); it is now logged at the end of the run.
+- **Step D written (2026-10-13, not yet run):** sky-view LUT. `sky_lut_cs` renders `SkyRadiance` (smooth sky incl. below-horizon haze/ground, no disk/moon/stars, 32 fixed steps, no jitter) into 320x192 RGBA16F `SkyLut` + `SkyLutTrans` (view transmittance) every frame, in the same command list as the trace (now inserted whenever the sky or the low-res trace is on). Mapping `SkyLutUv`/`SkyLutDirection`: u = world azimuth (WRAP), v = elevation relative to the geometric horizon with a sqrt warp per side (horizon at v = 0.5). The blit samples it and adds sun disk, moon and night sky at full res.
+- **Step D measured (Half, 2052x914):** absolute GPU medians High 3.20 -> **2.31 ms**, High sky only 2.34 -> 1.44 ms (the sky got ~0.9 ms cheaper). This run's Off was 1.00 ms (was 1.20), so compare absolute medians, not "cost". Costs vs this Off: Low 0.67, Medium 0.83, **High 1.31**, Ultra 1.68 ms; sky only 0.44 ms. High went from 4.10 ms (original full-res) to ~1.1 to 1.3 ms.
+- **Night sky rewritten (same step):** three star layers (dense faint / medium / sparse bright with halo) with pixel-footprint-aware sizing (energy-preserving, no shimmer), star density boosted near the galactic plane, Milky Way band (baked shape noise for mottling, dust lanes, warm core toward `GAL_CENTER`, faint colored nebulae), all rotating with `star_angle`. New properties `StarDensity`, `MilkyWayBrightness`.
+- Remaining steps: B blue noise + temporal (quality, fewer steps), C depth-aware upsample (edges).
+
+### Next steps (Phase 5)
+1. ~~Baseline~~ done (above). Next run: `CloudBenchmark` breakdown passes (High sky only / no aerial / clouds only) to split the cost before choosing the first optimization.
+2. Spike: how a post process renders into a lower-resolution offscreen target and keeps a history buffer across frames (and gets the previous frame's view-projection).
+3. Then, in order: reduced-resolution clouds plus depth-aware upsample; blue noise plus frame index; temporal accumulation with reprojection; empty-space skipping; optional sky-view texture, Low-tier 2D dome, async bake.
 
 ---
 
@@ -205,6 +248,9 @@ The current implementation is expensive: a light march at every cloud step and a
 - **Detail erosion:** a flat threshold made the detail texture's cell pattern dominate at high strength. It now scales by `(1 - density)^2`. If the pattern is still visible, raise `DetailTilesPerKm` (4 to 6) or add distortion.
 - **HLSL:** use `SampleLevel` (not `Sample`) inside loops; prefer integer PCG hashes over `sin`-based hashes.
 - **Restart the editor after a shader compile failure.** After `sky_clouds.shader` failed to compile, the effect stayed invisible (no errors, debug views dead) even once it compiled cleanly; an engine restart fixed it, so a stale material/shader was cached. If the effect vanishes after shader edits, check `logs/sbox-dev.log` for "Shader compile failed", fix, then restart.
+- **Reprojection convention:** `ReprojectFromLastFrameSs` returns a continuous screen position with pixel centers at +0.5 (same as `Depth::GetWorldPosition` input), so `prevUv = prevSs.xy * g_vInvViewportSize`. `Motion.hlsl`'s `+ 0.5` is only for integer thread-index input; copying it caused drift/warping while rotating. Sample history bilinearly.
+- **A newly added ComputeShader can get stuck on an error shader** if it was created while its shader failed to compile ("DispatchComputeShader failed - bound pipeline does not have a compute shader"). Restart the editor after fixing the compile error.
+- **Compute shader includes:** use the engine DOF pattern, `#include "postprocess/shared.hlsl"` then `common/classes/Depth.hlsl` inside `CS` (no `COMMON` block). `system.fxc` + `common.fxc` alone leave `RemapValClamped` undefined in `Depth.hlsl` (its definition is not in the shipped shader sources).
 - **HLSL parser:** the s&box ANTLR HLSL parser rejects global `static const float3 X = float3(...)` declarations ("Mismatched Token Exception"); scalar `static const float` is fine. Use `#define` for vector constants (the parser sees preprocessed source). Exponent literals, hex literals and array initializers were also removed as a precaution while diagnosing this; they were not proven to be the cause.
 
 ---

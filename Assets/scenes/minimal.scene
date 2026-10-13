@@ -45,7 +45,7 @@
       "Flags": 0,
       "Name": "Sun",
       "Position": "0,0,0",
-      "Rotation": "-0.157391235,0.192825258,0.612434268,0.750313699",
+      "Rotation": "0.0700758547,0.0756417885,-0.675979555,0.729670763",
       "Scale": "1,1,1",
       "Tags": "light_directional,light",
       "Enabled": true,
@@ -64,7 +64,7 @@
           "Contribution": "Diffuse, Specular, Transmissive",
           "FogMode": "Enabled",
           "FogStrength": 1,
-          "LightColor": "0.85243,0.69437,0.48747,1",
+          "LightColor": "0.69404,0.45953,0.22795,1",
           "OnComponentDestroy": null,
           "OnComponentDisabled": null,
           "OnComponentEnabled": null,
@@ -84,7 +84,7 @@
           "__guid": "7eec6cd9-1af7-4075-981e-5eff2e56b6c0",
           "__enabled": true,
           "Flags": 0,
-          "Color": "0.24771,0.39121,0.74714,1",
+          "Color": "0.21019,0.28948,0.53231,1",
           "OnComponentDestroy": null,
           "OnComponentDisabled": null,
           "OnComponentEnabled": null,
@@ -100,8 +100,8 @@
       "__version": 2,
       "Flags": 0,
       "Name": "Camera",
-      "Position": "-267.451996,-379.653229,10",
-      "Rotation": "3.75149156E-08,0,0,1",
+      "Position": "10524.1953,-379.653259,2456.30884",
+      "Rotation": "3.74714482E-08,-0.126055911,1.80529758E-09,0.99202311",
       "Scale": "1,1,1",
       "Tags": "",
       "Enabled": true,
@@ -228,7 +228,7 @@
           "ExtinctionPerMeter": 0.015,
           "GroundAlbedo": "0.25,0.25,0.22,1",
           "GroundLevel": 0,
-          "HorizonFadeDegrees": 15,
+          "HorizonFadeDegrees": 90,
           "Layers": [
             {
               "Enabled": true,
@@ -250,9 +250,9 @@
             {
               "Enabled": true,
               "BottomMeters": 13586.956,
-              "TopMeters": 14456.521,
-              "Coverage": 0.092391305,
-              "Density": 0.5217391,
+              "TopMeters": 16847.826,
+              "Coverage": 0.038043477,
+              "Density": 0.5652174,
               "CloudType": 0.29347825,
               "HeightVariation": 0.79891306,
               "Anvil": 0,
@@ -267,7 +267,8 @@
           ],
           "MaxCloudDistanceKm": 40,
           "MaxSunElevation": 70,
-          "MoonDiskDegrees": 1.2,
+          "MilkyWayBrightness": 1,
+          "MoonDiskDegrees": 0.6562802,
           "OnComponentDestroy": null,
           "OnComponentDisabled": null,
           "OnComponentEnabled": null,
@@ -276,10 +277,13 @@
           "OnComponentUpdate": null,
           "Quality": "Ultra",
           "ReplaceSky": true,
+          "Resolution": "Half",
           "SceneSunIntensity": 1,
           "SkyExposure": 2,
-          "SkySunIntensity": 22,
+          "SkySunIntensity": 13,
           "StarBrightness": 1,
+          "StarDensity": 1.6992753,
+          "StarSize": 1.4,
           "Sun": {
             "_type": "component",
             "component_id": "d3659344-a90d-48fa-927a-095f70fe041f",
@@ -291,7 +295,7 @@
           "SunDiskDegrees": 0.8,
           "SunIntensity": 1.5,
           "SyncSceneLights": true,
-          "TimeOfDay": 15.942029
+          "TimeOfDay": 6.84058
         }
       ],
       "Children": []
@@ -466,6 +470,39 @@
           },
           "RenderType": "On",
           "Tint": "1,1,1,1"
+        },
+        {
+          "__type": "CloudBenchmark",
+          "__guid": "151f5bf7-a553-4a5a-acb1-e24a45279385",
+          "__enabled": true,
+          "Flags": 0,
+          "Angles": "0,0,0",
+          "Clouds": {
+            "_type": "component",
+            "component_id": "1707e429-dc1d-45fa-a33d-1440359aad08",
+            "go": "3ee1c9f4-07be-4e0b-8b23-67bee2d8ec8a",
+            "component_type": "SkyCloudSystem"
+          },
+          "DisableDuringRun": {
+            "_type": "component",
+            "component_id": "da9621e3-b247-4283-9de4-b30d1d5e8b36",
+            "go": "3ee1c9f4-07be-4e0b-8b23-67bee2d8ec8a",
+            "component_type": "Freecam"
+          },
+          "IncludeBreakdown": true,
+          "IncludeOffPass": true,
+          "OnComponentDestroy": null,
+          "OnComponentDisabled": null,
+          "OnComponentEnabled": null,
+          "OnComponentFixedUpdate": null,
+          "OnComponentStart": null,
+          "OnComponentUpdate": null,
+          "Position": "0,0,0",
+          "RunOnStart": true,
+          "SampleSeconds": 6,
+          "TimeOfDay": 10,
+          "UseStartPose": true,
+          "WarmupSeconds": 3
         }
       ],
       "Children": []
