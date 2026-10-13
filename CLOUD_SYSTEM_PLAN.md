@@ -3,7 +3,7 @@
 Handoff document for continuing this work in Claude Code. It records the goal, decisions, current state, remaining phases and the gotchas found so far.
 
 **Engine:** s&box. **Language:** C# component plus an HLSL post-process shader.
-**Last updated:** 2026-10-13.
+**Last updated:** 2026-10-13 (end of Phase 5 Step B).
 
 ---
 
@@ -103,7 +103,7 @@ s&box compiles user code with a **whitelist**. `System.Threading.Tasks.Parallel`
 - Direct sun color is the atmosphere-tinted color, so sunsets color the clouds automatically.
 
 ### Shader attribute contract (names must match C# and HLSL)
-`sun_dir, sun_color, ambient_top, ambient_bottom, sun_disk_cos, moon_dir, moon_disk_cos, sky_enabled, sky_sun_intensity, sky_exposure, cloud_exposure, aerial_strength, ground_albedo, star_brightness, star_angle, horizon_fade, ground_z, max_cloud_distance, extinction, step_count, light_steps, sky_steps, debug_mode, CloudLayers, layer_count, ShapeNoise, DetailNoise, WeatherMap`; blit only: `CloudTex, cloud_lowres, SkyLut, SkyLutTrans, star_density, milky_way`; compute only: `CloudOut, cloud_size, SkyLutOut, SkyLutTrans, sky_lut_size`. The camera far plane comes from the engine's `g_flFarPlane`.
+`sun_dir, sun_color, ambient_top, ambient_bottom, sun_disk_cos, moon_dir, moon_disk_cos, sky_enabled, sky_sun_intensity, sky_exposure, cloud_exposure, aerial_strength, ground_albedo, star_brightness, star_angle, horizon_fade, ground_z, max_cloud_distance, extinction, step_count, light_steps, sky_steps, debug_mode, CloudLayers, layer_count, ShapeNoise, DetailNoise, WeatherMap`; blit only: `CloudTex, cloud_lowres, SkyLut, SkyLutTrans, star_density, milky_way`; compute only: `CloudOut, CloudDepthOut, BlueNoise, cloud_size, frame_index, SkyLutOut, SkyLutTrans, sky_lut_size, CloudCurrent, CloudDepth, CloudHistory, CloudResolved, temporal_blend, has_history`. The camera far plane comes from the engine's `g_flFarPlane`.
 
 ### Debug views (`CloudDebugView`)
 - `LayerIntervals`: R/G/B show each layer's march interval (verified working).
@@ -122,7 +122,7 @@ s&box compiles user code with a **whitelist**. `System.Threading.Tasks.Parallel`
 | 2b. Shape tuning | Superseded | Folded into the vertical-structure work; final shape tuning by eye later. |
 | 3. Sky | **Done (user sign-off 2026-10-13)** | Horizon noise and below-horizon gray fixed (stable `GroundDistance`, quadratic atmosphere steps, horizon haze fade). |
 | 4. Cloud lighting | **Done (user sign-off 2026-10-13)** | |
-| 5. Performance | **In progress** | Baseline measurement via `CloudBenchmark`. Already done: non-uniform atmosphere steps, steps bunched near the camera on long cloud rays, detail fade with distance. |
+| 5. Performance | **Mostly done** | High at 2052x914: 4.10 ms -> 0.89 ms (all tiers 0.49 to 1.08 ms). Done: half-res compute trace, sky-view LUT, blue noise + temporal accumulation, non-uniform steps, detail fade with distance. Step counts retuned (High 40). Open: optional depth-aware upsample, empty-space skipping, async bake. |
 | 6. Layers and weather | Partly done | Vertical structure (per-cloud tops, cloud type, anvil) and `StructuredBuffer` layers done and verified (needed some settings tuning). Rest open. |
 | 7-9 | Not started | See section 5. |
 
@@ -168,15 +168,24 @@ Runs repeat within ~0.1 ms. Tilting toward the horizon barely changed the cost, 
 
   Half, all tiers: Low 0.86, Medium 1.28, High 2.00, Ultra 2.85 ms. **The full-res sky (~0.85 ms) is now the largest cost at High.**
 - Benchmark note: `Screen.Size` read at play start can be stale (logged 1024x1024 for a 2052x914 run); it is now logged at the end of the run.
-- **Step D written (2026-10-13, not yet run):** sky-view LUT. `sky_lut_cs` renders `SkyRadiance` (smooth sky incl. below-horizon haze/ground, no disk/moon/stars, 32 fixed steps, no jitter) into 320x192 RGBA16F `SkyLut` + `SkyLutTrans` (view transmittance) every frame, in the same command list as the trace (now inserted whenever the sky or the low-res trace is on). Mapping `SkyLutUv`/`SkyLutDirection`: u = world azimuth (WRAP), v = elevation relative to the geometric horizon with a sqrt warp per side (horizon at v = 0.5). The blit samples it and adds sun disk, moon and night sky at full res.
+- **Step D done (2026-10-13):** sky-view LUT. `sky_lut_cs` renders `SkyRadiance` (smooth sky incl. below-horizon haze/ground, no disk/moon/stars, 32 fixed steps, no jitter) into 320x192 RGBA16F `SkyLut` + `SkyLutTrans` (view transmittance) every frame, in the same command list as the trace (now inserted whenever the sky or the low-res trace is on). Mapping `SkyLutUv`/`SkyLutDirection`: u = world azimuth (WRAP), v = elevation relative to the geometric horizon with a sqrt warp per side (horizon at v = 0.5). The blit samples it and adds sun disk, moon and night sky at full res.
 - **Step D measured (Half, 2052x914):** absolute GPU medians High 3.20 -> **2.31 ms**, High sky only 2.34 -> 1.44 ms (the sky got ~0.9 ms cheaper). This run's Off was 1.00 ms (was 1.20), so compare absolute medians, not "cost". Costs vs this Off: Low 0.67, Medium 0.83, **High 1.31**, Ultra 1.68 ms; sky only 0.44 ms. High went from 4.10 ms (original full-res) to ~1.1 to 1.3 ms.
 - **Night sky rewritten (same step):** three star layers (dense faint / medium / sparse bright with halo) with pixel-footprint-aware sizing (energy-preserving, no shimmer), star density boosted near the galactic plane, Milky Way band (baked shape noise for mottling, dust lanes, warm core toward `GAL_CENTER`, faint colored nebulae), all rotating with `star_angle`. New properties `StarDensity`, `MilkyWayBrightness`.
-- Remaining steps: B blue noise + temporal (quality, fewer steps), C depth-aware upsample (edges).
+- **Step B done (2026-10-13, user sign-off):** blue noise + temporal accumulation.
+  - `cloud_trace_cs` jitter = `frac(blueNoise + frame_index * 0.618)` (engine `textures/dev/blue_noise_256.vtex`, loaded with `Texture.Load`), and a second output `CloudDepthOut` (R32F transmittance-weighted cloud distance, -1 = none). `MarchClouds` gained `out float cloudDist`.
+  - `cloud_temporal_cs`: reproject with the cloud distance (direction-only for empty texels), clamp history to the current 3x3 mean +- 1.25 sigma, blend `TemporalBlend` (default 0.9) of history, scaled down to 0.6x for clouds within ~1 km; ping-pong `_historyA/_historyB`, the blit samples the resolved one.
+  - History resets on resize, toggle, or a camera jump > 2000 units in one frame. `UavBarrier( Texture )` between trace and temporal (works).
+  - New properties `Temporal` (default on), `TemporalBlend`, `Jitter` (BlueNoise / InterleavedGradient with per-frame offset; Temporal off always uses plain IGN, the pre-temporal look).
+  - Measured: temporal adds ~0.05 ms (High 1.18 ms cost at Half). User saw no difference between blue noise and IGN. First version had drifting fringes on cloud edges and moving stripes from a quarter-texel offset (see gotchas); fixed and confirmed.
+- **Current cost (Half, Temporal on, 2052x914):** Low 0.53, Medium 0.70, **High 1.18**, Ultra 1.55 ms (vs 1.43 / 2.30 / 4.09 / 5.90 at the start of the phase). Temporal costs ~0.05 ms; sky only ~0.3 ms.
 
-### Next steps (Phase 5)
-1. ~~Baseline~~ done (above). Next run: `CloudBenchmark` breakdown passes (High sky only / no aerial / clouds only) to split the cost before choosing the first optimization.
-2. Spike: how a post process renders into a lower-resolution offscreen target and keeps a history buffer across frames (and gets the previous frame's view-projection).
-3. Then, in order: reduced-resolution clouds plus depth-aware upsample; blue noise plus frame index; temporal accumulation with reprojection; empty-space skipping; optional sky-view texture, Low-tier 2D dome, async bake.
+### Phase 5: what is left
+1. **Retune step counts per tier: done (2026-10-13).** User: 40 is the floor for High (lower is visibly worse). Result at the benchmark pose (Half, Temporal, 2052x914): **Low 0.49, Medium 0.57, High 0.89, Ultra 1.08 ms** (High was 4.09 ms at the start of Phase 5, 4.6x faster); High sky only 0.29, clouds only 0.70 ms. Details: with Temporal on (and Resolution not Full) view steps are Low 12 / Medium 20 / High 40 / Ultra 56; Temporal off keeps 16 / 32 / 64 / 96. Light steps unchanged (not jittered, so temporal does not help them). `ViewStepsOverride` (0 = auto) for A/B by eye; the benchmark logs steps per pass.
+2. **Depth-aware upsample (Step C)**: only needed if halos appear where geometry meets sky. User has not reported geometry halos (the cloud-edge fringe was the quarter-texel bug).
+3. **Empty-space skipping**: coarse pre-march to skip empty stretches of tall layers. Worth it if a cloudier/taller setup measures much slower than the benchmark pose.
+4. **Async noise bake**: Ultra/High bake is ~1.7 s on the main thread (start-up and quality changes).
+5. Dropped: Low-tier 2D cloud dome (Low already costs ~0.5 ms), sky inside the trace pass (replaced by the sky-view LUT).
+6. Final per-tier table at a couple of poses (incl. a cloudier one) to close the phase.
 
 ---
 
@@ -225,7 +234,7 @@ The current implementation is expensive: a light march at every cloud step and a
 
 ### Other backlog items
 - Moonlight (second light source and tinted night ambient); the scene sun currently goes black below the horizon.
-- Milky Way (needs a texture) and brighter/colored star variation.
+- ~~Milky Way and star variation~~ done procedurally (2026-10-13). Possible later: moon phases / textured moon.
 - Curl-noise distortion of the detail sampling to break up the repeating 400 m detail tile pattern if it is still visible.
 - Fix the near-camera cases: stable fog-like in-cloud falloff, minimum step size near the camera.
 - Altitudes above ~80 km are clamped in the atmosphere code; real space transitions belong to Phase 9.
@@ -250,6 +259,8 @@ The current implementation is expensive: a light march at every cloud step and a
 - **Restart the editor after a shader compile failure.** After `sky_clouds.shader` failed to compile, the effect stayed invisible (no errors, debug views dead) even once it compiled cleanly; an engine restart fixed it, so a stale material/shader was cached. If the effect vanishes after shader edits, check `logs/sbox-dev.log` for "Shader compile failed", fix, then restart.
 - **Reprojection convention:** `ReprojectFromLastFrameSs` returns a continuous screen position with pixel centers at +0.5 (same as `Depth::GetWorldPosition` input), so `prevUv = prevSs.xy * g_vInvViewportSize`. `Motion.hlsl`'s `+ 0.5` is only for integer thread-index input; copying it caused drift/warping while rotating. Sample history bilinearly.
 - **A newly added ComputeShader can get stuck on an error shader** if it was created while its shader failed to compile ("DispatchComputeShader failed - bound pipeline does not have a compute shader"). Restart the editor after fixing the compile error.
+- **Low-res texel -> full-res position must be the exact texel center** `(id + 0.5) * scale` in every pass (trace, temporal) so it matches the blit's bilinear upsample and the reprojection. Snapping to a full-res pixel center (`floor(...) + 0.5`) offset everything by a quarter texel, which the temporal pass re-applied every frame: drifting fringes on cloud edges and fine stripes that moved with the camera.
+- **Hot reload keeps old field values and starts new fields at their defaults.** Lazy-allocation checks must test every resource (e.g. all render targets), not one representative, or newly added ones stay null ("Error when executing CommandList ... ArgumentNullException (Parameter 'texture')" from `UavBarrier`).
 - **Compute shader includes:** use the engine DOF pattern, `#include "postprocess/shared.hlsl"` then `common/classes/Depth.hlsl` inside `CS` (no `COMMON` block). `system.fxc` + `common.fxc` alone leave `RemapValClamped` undefined in `Depth.hlsl` (its definition is not in the shipped shader sources).
 - **HLSL parser:** the s&box ANTLR HLSL parser rejects global `static const float3 X = float3(...)` declarations ("Mismatched Token Exception"); scalar `static const float` is fine. Use `#define` for vector constants (the parser sees preprocessed source). Exponent literals, hex literals and array initializers were also removed as a precaution while diagnosing this; they were not proven to be the cause.
 

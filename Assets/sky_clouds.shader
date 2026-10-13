@@ -255,7 +255,10 @@ PS
         if (cloud_lowres > 0.5)
             clouds = CloudTex.SampleLevel(g_sBilinearMirror, uv, 0);
         else
-            clouds = MarchClouds(r, jitter);
+        {
+            float cloudDist;
+            clouds = MarchClouds(r, jitter, cloudDist);
+        }
 
         if (debug_mode > 1.5 && debug_mode < 2.5)
             return float4((1.0 - clouds.a).xxx, 1.0);

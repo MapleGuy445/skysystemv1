@@ -224,7 +224,8 @@ public sealed class CloudBenchmark : Component
 			_offGpu = med;
 
 		string cost = _offGpu is null || _passes[_pass].Quality is null ? "" : $"   cost {med - _offGpu.Value,6:0.00} ms";
-		_results.Add( $"{name,-16} GPU avg {avg,6:0.00}  med {med,6:0.00}  p95 {p95,6:0.00}   CPU frame {cpu,6:0.00} ms   n={_gpu.Count}{cost}" );
+		string steps = _passes[_pass].Quality is null ? "" : $"   steps {Clouds.ViewSteps}";
+		_results.Add( $"{name,-16} GPU avg {avg,6:0.00}  med {med,6:0.00}  p95 {p95,6:0.00}   CPU frame {cpu,6:0.00} ms   n={_gpu.Count}{cost}{steps}" );
 	}
 
 	void Finish()
@@ -236,6 +237,6 @@ public sealed class CloudBenchmark : Component
 			DisableDuringRun.Enabled = true;
 
 		// Screen.Size is read here, not at start: at play start it can still report a stale size.
-		Log.Info( $"CloudBenchmark: results at {Screen.Size.x}x{Screen.Size.y}, resolution={Clouds.Resolution} (GPU ms; cost = median minus Off median)\n" + string.Join( "\n", _results ) );
+		Log.Info( $"CloudBenchmark: results at {Screen.Size.x}x{Screen.Size.y}, resolution={Clouds.Resolution}, temporal={Clouds.Temporal}, stepsOverride={Clouds.ViewStepsOverride} (GPU ms; cost = median minus Off median)\n" + string.Join( "\n", _results ) );
 	}
 }

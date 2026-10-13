@@ -392,9 +392,13 @@ float3 CloudLayerIntervals(CloudRay r)
 // The cloud march for one view ray.
 // Returns rgb = tone-mapped cloud colour with aerial perspective applied,
 // premultiplied by opacity; a = transmittance. Composite: bg * a + rgb.
+// cloudDist: transmittance-weighted mean distance of the cloud (meters), or
+// -1 if the ray saw no cloud. Used for temporal reprojection.
 // ------------------------------------------------------------------
-float4 MarchClouds(CloudRay r, float jitter)
+float4 MarchClouds(CloudRay r, float jitter, out float cloudDist)
 {
+    cloudDist = -1.0;
+
     float3 ro = r.ro;
     float3 rd = r.rd;
     float maxT = r.maxT;
@@ -498,6 +502,9 @@ float4 MarchClouds(CloudRay r, float jitter)
         float3 insCTM = 1.0 - exp(-insC * sky_exposure);
         cloudRad = lerp(cloudRad, cloudRad * Tc + alpha * insCTM, aerial_strength);
     }
+
+    if (weightSum > 0.0)
+        cloudDist = distSum / weightSum;
 
     return float4(cloudRad, transmittance);
 }

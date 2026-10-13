@@ -32,6 +32,13 @@ public enum CloudResolution
 	Quarter = 4
 }
 
+/// <summary>Jitter source for the cloud march when temporal accumulation is on.</summary>
+public enum CloudJitter
+{
+	BlueNoise = 1,          // engine blue_noise_256 + golden-ratio frame offset
+	InterleavedGradient = 2 // IGN with a per-frame pixel offset (texture-free)
+}
+
 public enum CloudDebugView
 {
 	Off = 0,
@@ -226,6 +233,18 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	/// <summary>Half = clouds marched at half width and height (1/4 of the pixels) in a compute pass, then upsampled.</summary>
 	[Property, Group( "Quality" )] public CloudResolution Resolution { get; set; } = CloudResolution.Half;
 
+	/// <summary>Blend each frame's low-res clouds with the reprojected previous result (needs Resolution Half or Quarter). Removes the per-pixel grain.</summary>
+	[Property, Group( "Quality" )] public bool Temporal { get; set; } = true;
+
+	/// <summary>0 = use the tier's step count (lower when Temporal is on). Otherwise forces the view-march steps per layer, for comparing by eye.</summary>
+	[Property, Group( "Quality" ), Range( 0, 128 )] public int ViewStepsOverride { get; set; } = 0;
+
+	/// <summary>Per-pixel step jitter used with Temporal on (off always uses the original interleaved gradient noise).</summary>
+	[Property, Group( "Quality" )] public CloudJitter Jitter { get; set; } = CloudJitter.BlueNoise;
+
+	/// <summary>How much of the history is kept each frame. Higher = smoother but slower to react; lowered automatically for clouds within ~1 km.</summary>
+	[Property, Group( "Quality" ), Range( 0, 0.97f )] public float TemporalBlend { get; set; } = 0.9f;
+
 	// ---- World ------------------------------------------------------------
 
 	/// <summary>World Z (in s&box units) that layer altitudes are measured from.</summary>
@@ -276,14 +295,25 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	Vector3 _ambientTop = new Vector3( 0.3f, 0.45f, 0.8f );
 	Vector3 _ambientBottom = new Vector3( 0.1f, 0.12f, 0.15f );
 
-	static int StepsFor( CloudQuality q ) => q switch
+	// View-march steps per layer. With temporal accumulation the per-pixel jitter
+	// is integrated over frames, so fewer steps give the same converged image;
+	// without it, the extra steps are what hide the noise.
+	static int StepsFor( CloudQuality q, bool temporal ) => (q, temporal) switch
 	{
-		CloudQuality.Low => 16,
-		CloudQuality.Medium => 32,
-		CloudQuality.High => 64,
-		CloudQuality.Ultra => 96,
+		(CloudQuality.Low, true) => 12,
+		(CloudQuality.Medium, true) => 20,
+		(CloudQuality.High, true) => 40,
+		(CloudQuality.Ultra, true) => 56,
+		(CloudQuality.Low, false) => 16,
+		(CloudQuality.Medium, false) => 32,
+		(CloudQuality.Ultra, false) => 96,
 		_ => 64
 	};
+
+	/// <summary>View-march steps per layer actually used this frame (tier table, temporal-aware, or the override).</summary>
+	public int ViewSteps => ViewStepsOverride > 0
+		? ViewStepsOverride
+		: StepsFor( Quality, Temporal && Resolution != CloudResolution.Full );
 
 	static int LightStepsFor( CloudQuality q ) => q switch
 	{
@@ -514,9 +544,17 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	// Vector2/3/4 (float and 2D Texture confirmed by the Phase 5 spike).
 
 	ComputeShader _traceCs;
+	ComputeShader _temporalCs;
 	CommandList _traceCl;
-	Texture _cloudTex;
+	Texture _cloudTex;      // this frame's trace (rgb premultiplied colour, a transmittance)
+	Texture _cloudDepth;    // this frame's cloud distance (m), -1 = none
+	Texture _historyA, _historyB; // resolved results, ping-pong
+	Texture _blueNoise;
 	int _cloudW, _cloudH;
+
+	int _frameIndex;
+	bool _historyValid;
+	Vector3 _lastCameraPos;
 
 	void SetShared( string name, float v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
 	void SetShared( string name, Vector3 v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
@@ -531,21 +569,86 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		int w = Math.Max( 1, (int)MathF.Ceiling( Screen.Size.x / div ) );
 		int h = Math.Max( 1, (int)MathF.Ceiling( Screen.Size.y / div ) );
 
-		if ( _cloudTex is null || w != _cloudW || h != _cloudH )
+		// Check every target, not just one: after a hot reload, fields added by the
+		// new code start out null while the old ones are still allocated.
+		bool missing = _cloudTex is null || _cloudDepth is null || _historyA is null || _historyB is null;
+		if ( missing || w != _cloudW || h != _cloudH )
 		{
-			_cloudTex?.Dispose();
+			DisposeCloudTargets();
 			_cloudTex = CreateUavTexture( "cloud_trace", w, h );
+			_cloudDepth = Texture.Create( w, h, ImageFormat.R32F )
+				.WithName( "cloud_trace_depth" )
+				.WithUAVBinding()
+				.WithGPUOnlyUsage()
+				.Finish();
+			_historyA = CreateUavTexture( "cloud_history_a", w, h );
+			_historyB = CreateUavTexture( "cloud_history_b", w, h );
 			_cloudW = w;
 			_cloudH = h;
+			_historyValid = false;
 		}
 
 		_traceCs ??= new ComputeShader( "cloud_trace_cs" );
+		_temporalCs ??= new ComputeShader( "cloud_temporal_cs" );
 
+		// API CHECK: engine blue noise texture path and that it reads as linear 0..1 in .r.
+		_blueNoise ??= Texture.Load( "textures/dev/blue_noise_256.vtex" );
+
+		// History is invalid after a toggle, a resize, or a camera teleport.
+		var camPos = Scene?.Camera?.WorldPosition ?? Vector3.Zero;
+		if ( !Temporal || camPos.Distance( _lastCameraPos ) > TeleportDistance )
+			_historyValid = false;
+		_lastCameraPos = camPos;
+
+		_frameIndex = (_frameIndex + 1) % 1024;
+
+		// --- Trace ---
 		_traceCl.Attributes.Set( "CloudOut", _cloudTex );
+		_traceCl.Attributes.Set( "CloudDepthOut", _cloudDepth );
+		_traceCl.Attributes.Set( "BlueNoise", _blueNoise );
 		_traceCl.Attributes.Set( "cloud_size", new Vector2( w, h ) );
+		_traceCl.Attributes.Set( "frame_index", Temporal ? (float)_frameIndex : 0f );
+		_traceCl.Attributes.Set( "jitter_mode", Temporal ? (float)(int)Jitter : 0f );
 		_traceCl.DispatchCompute( _traceCs, w, h, 1 );
 
-		Attributes.Set( "CloudTex", _cloudTex );
+		if ( !Temporal )
+		{
+			Attributes.Set( "CloudTex", _cloudTex );
+			return;
+		}
+
+		// --- Temporal: read last frame's resolve, write this frame's ---
+		var write = (_frameIndex & 1) == 0 ? _historyA : _historyB;
+		var read = (_frameIndex & 1) == 0 ? _historyB : _historyA;
+
+		// API CHECK: UavBarrier so the temporal pass sees the trace's writes
+		// (compute -> compute in one command list; the spike only proved
+		// compute -> pixel and frame-to-frame).
+		_traceCl.UavBarrier( _cloudTex );
+		_traceCl.UavBarrier( _cloudDepth );
+
+		_traceCl.Attributes.Set( "CloudCurrent", _cloudTex );
+		_traceCl.Attributes.Set( "CloudDepth", _cloudDepth );
+		_traceCl.Attributes.Set( "CloudHistory", read );
+		_traceCl.Attributes.Set( "CloudResolved", write );
+		_traceCl.Attributes.Set( "temporal_blend", TemporalBlend );
+		_traceCl.Attributes.Set( "has_history", _historyValid ? 1f : 0f );
+		_traceCl.DispatchCompute( _temporalCs, w, h, 1 );
+
+		_historyValid = true;
+		Attributes.Set( "CloudTex", write );
+	}
+
+	/// <summary>Camera jumps larger than this (world units) per frame drop the cloud history.</summary>
+	const float TeleportDistance = 2000f;
+
+	void DisposeCloudTargets()
+	{
+		_cloudTex?.Dispose();
+		_cloudDepth?.Dispose();
+		_historyA?.Dispose();
+		_historyB?.Dispose();
+		_cloudTex = _cloudDepth = _historyA = _historyB = null;
 	}
 
 	// ---- Sky-view LUT (Phase 5) ---------------------------------------------
@@ -584,10 +687,11 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 
 	void DisposeTrace()
 	{
-		_cloudTex?.Dispose();
+		DisposeCloudTargets();
 		_skyLut?.Dispose();
 		_skyLutTrans?.Dispose();
-		_cloudTex = _skyLut = _skyLutTrans = null;
+		_skyLut = _skyLutTrans = null;
+		_historyValid = false;
 	}
 
 	// ---- Update / render --------------------------------------------------
@@ -652,7 +756,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		// (The camera far plane comes from the engine's g_flFarPlane in the shader.)
 
 		// --- Quality / debug ---
-		SetShared( "step_count", (float)StepsFor( Quality ) );
+		SetShared( "step_count", (float)ViewSteps );
 		SetShared( "light_steps", (float)LightStepsFor( Quality ) );
 		SetShared( "sky_steps", (float)SkyStepsFor( Quality ) );
 		SetShared( "debug_mode", (float)(int)DebugView );
