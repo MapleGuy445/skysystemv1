@@ -356,6 +356,11 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		_layerBuffer?.Dispose();
 		_layerBuffer = null;
 		DisposeTrace();
+		_placeholder3D?.Dispose();
+		_placeholder2D?.Dispose();
+		_placeholder3D = _placeholder2D = null;
+		// A bake still running keeps going; its result is uploaded on re-enable if
+		// the size still matches, otherwise discarded.
 	}
 
 	void DisposeNoise()
@@ -371,22 +376,61 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	/// Bakes on first use and again if the quality tier changes the texture size.
 	/// Runs synchronously (one-time hitch; the time is logged).
 	/// </summary>
+	/// <summary>Noise generated on a worker thread, waiting to be uploaded.</summary>
+	sealed record NoiseBake( int ShapeSize, int DetailSize, int WeatherSize, byte[] Shape, byte[] Detail, byte[] Weather );
+
+	System.Threading.Tasks.Task<NoiseBake> _bakeTask;
+	float _bakeStart;
+
+	/// <summary>
+	/// Keeps the noise matching the quality tier without stalling the game:
+	/// the CPU bake runs on a worker thread and the textures are uploaded (main
+	/// thread) once it finishes. Until then the previous textures stay in use;
+	/// on the very first bake Render uses 1x1 placeholders and draws no clouds.
+	/// A result for an outdated size (quality changed mid-bake) is discarded.
+	/// API CHECK: GameTask.RunInThreadAsync, Task.IsCompleted / Result in the whitelist.
+	/// </summary>
 	void EnsureNoise()
 	{
 		int shapeSize = ShapeSizeFor( Quality );
-		if ( _shapeNoise is not null && _bakedShapeSize == shapeSize )
+
+		if ( _bakeTask is not null && _bakeTask.IsCompleted )
+		{
+			var task = _bakeTask;
+			_bakeTask = null;
+
+			if ( task.IsFaulted || task.IsCanceled )
+			{
+				Log.Warning( $"Cloud noise bake failed: {task.Exception?.InnerException?.Message}" );
+			}
+			else if ( task.Result.ShapeSize == shapeSize )
+			{
+				var b = task.Result;
+				DisposeNoise();
+				_shapeNoise = CloudNoiseBaker.CreateShape( b.ShapeSize, b.Shape );
+				_detailNoise = CloudNoiseBaker.CreateDetail( b.DetailSize, b.Detail );
+				_weatherMap = CloudNoiseBaker.CreateWeather( b.WeatherSize, b.Weather );
+				_bakedShapeSize = b.ShapeSize;
+
+				Log.Info( $"Cloud noise baked ({b.ShapeSize}^3 shape) in {(RealTime.Now - _bakeStart) * 1000f:0} ms (background)" );
+			}
+		}
+
+		if ( _bakedShapeSize == shapeSize || _bakeTask is not null )
 			return;
 
-		float start = RealTime.Now;
-
-		DisposeNoise();
-		_shapeNoise = CloudNoiseBaker.BakeShape( shapeSize );
-		_detailNoise = CloudNoiseBaker.BakeDetail( DetailSizeFor( Quality ) );
-		_weatherMap = CloudNoiseBaker.BakeWeather( 256 );
-		_bakedShapeSize = shapeSize;
-
-		Log.Info( $"Cloud noise baked ({shapeSize}^3 shape) in {(RealTime.Now - start) * 1000f:0} ms" );
+		int detailSize = DetailSizeFor( Quality );
+		_bakeStart = RealTime.Now;
+		_bakeTask = GameTask.RunInThreadAsync( () => new NoiseBake(
+			shapeSize, detailSize, 256,
+			CloudNoiseBaker.BakeShapeData( shapeSize ),
+			CloudNoiseBaker.BakeDetailData( detailSize ),
+			CloudNoiseBaker.BakeWeatherData( 256 ) ) );
 	}
+
+	Texture _placeholder3D, _placeholder2D;
+
+	bool HasNoise => _shapeNoise is not null && _detailNoise is not null && _weatherMap is not null;
 
 	// ---- Sun / atmosphere state ------------------------------------------
 
@@ -716,9 +760,15 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 
 	public override void Render()
 	{
-		// Nothing to draw until the noise exists (avoids a black/garbage frame).
-		if ( _shapeNoise is null || _detailNoise is null || _weatherMap is null )
-			return;
+		// While the first noise bake runs in the background, render the sky with
+		// 1x1 placeholder noise and no cloud layers (clouds then fade in through
+		// the temporal history once the real noise arrives).
+		bool hasNoise = HasNoise;
+		if ( !hasNoise )
+		{
+			_placeholder3D ??= CloudNoiseBaker.CreatePlaceholder3D( "cloud_noise_placeholder_3d" );
+			_placeholder2D ??= CloudNoiseBaker.CreatePlaceholder2D( "cloud_noise_placeholder_2d" );
+		}
 
 		_material ??= Material.FromShader( "sky_clouds.shader" );
 
@@ -763,12 +813,14 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 
 		// --- Baked noise ---
 		// API CHECK: Attributes.Set( string, Texture ) for 2D and 3D textures.
-		SetShared( "ShapeNoise", _shapeNoise );
-		SetShared( "DetailNoise", _detailNoise );
-		SetShared( "WeatherMap", _weatherMap );
+		SetShared( "ShapeNoise", hasNoise ? _shapeNoise : _placeholder3D );
+		SetShared( "DetailNoise", hasNoise ? _detailNoise : _placeholder3D );
+		SetShared( "WeatherMap", hasNoise ? _weatherMap : _placeholder2D );
 
-		// --- Layers: one structured buffer + count ---
+		// --- Layers: one structured buffer + count (none until the noise exists) ---
 		int layerCount = UploadLayers();
+		if ( !hasNoise )
+			layerCount = 0;
 		SetShared( "CloudLayers", _layerBuffer );
 		SetShared( "layer_count", (float)layerCount );
 

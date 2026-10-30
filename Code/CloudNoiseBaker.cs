@@ -5,6 +5,8 @@ using System;
 //  CloudNoiseBaker  -  Phase 2
 //
 //  Bakes tileable cloud noise on the CPU and uploads it as textures.
+//  Bake*Data is pure CPU work and runs on a worker thread (SkyCloudSystem
+//  uses GameTask.RunInThreadAsync); Create* uploads on the main thread.
 //
 //    Shape   3D  RGBA8   R = Perlin-Worley (base form)
 //                        G/B/A = Worley fBm at increasing frequency (erosion)
@@ -152,8 +154,8 @@ public static class CloudNoiseBaker
 
 	// ------------------------------------------------------------------ public API
 
-	/// <summary>128 (High/Ultra) or 64 (Low/Medium) cubed.</summary>
-	public static Texture BakeShape( int size )
+	/// <summary>128 (High/Ultra) or 64 (Low/Medium) cubed. Pure CPU work: safe on a worker thread.</summary>
+	public static byte[] BakeShapeData( int size )
 	{
 		var data = new byte[size * size * size * 4];
 
@@ -184,14 +186,18 @@ public static class CloudNoiseBaker
 			}
 		} );
 
-		return Texture.CreateVolume( size, size, size, ImageFormat.RGBA8888 )
+		return data;
+	}
+
+	/// <summary>Uploads BakeShapeData output. Main thread.</summary>
+	public static Texture CreateShape( int size, byte[] data ) =>
+		Texture.CreateVolume( size, size, size, ImageFormat.RGBA8888 )
 			.WithName( "cloud_shape_noise" )
 			.WithData( data, data.Length )
 			.Finish();
-	}
 
-	/// <summary>32 (High/Ultra) or 16 (Low/Medium) cubed.</summary>
-	public static Texture BakeDetail( int size )
+	/// <summary>32 (High/Ultra) or 16 (Low/Medium) cubed. Pure CPU work: safe on a worker thread.</summary>
+	public static byte[] BakeDetailData( int size )
 	{
 		var data = new byte[size * size * size * 4];
 
@@ -214,14 +220,18 @@ public static class CloudNoiseBaker
 			}
 		} );
 
-		return Texture.CreateVolume( size, size, size, ImageFormat.RGBA8888 )
+		return data;
+	}
+
+	/// <summary>Uploads BakeDetailData output. Main thread.</summary>
+	public static Texture CreateDetail( int size, byte[] data ) =>
+		Texture.CreateVolume( size, size, size, ImageFormat.RGBA8888 )
 			.WithName( "cloud_detail_noise" )
 			.WithData( data, data.Length )
 			.Finish();
-	}
 
 	/// <summary>Tileable 2D weather map. R = coverage modulation, G = reserved for cloud type.</summary>
-	public static Texture BakeWeather( int size = 256 )
+	public static byte[] BakeWeatherData( int size = 256 )
 	{
 		var data = new byte[size * size * 4];
 
@@ -247,9 +257,32 @@ public static class CloudNoiseBaker
 			}
 		} );
 
-		return Texture.Create( size, size, ImageFormat.RGBA8888 )
+		return data;
+	}
+
+	/// <summary>Uploads BakeWeatherData output. Main thread.</summary>
+	public static Texture CreateWeather( int size, byte[] data ) =>
+		Texture.Create( size, size, ImageFormat.RGBA8888 )
 			.WithName( "cloud_weather_map" )
 			.WithData( data, data.Length )
 			.Finish();
-	}
+
+	// ------------------------------------------------------------------ placeholders
+
+	/// <summary>
+	/// 1x1(x1) mid-gray textures bound while the real noise bakes in the
+	/// background, so the sky (which samples the shape noise for the Milky Way)
+	/// can render immediately. Clouds are disabled until the real noise arrives.
+	/// </summary>
+	public static Texture CreatePlaceholder3D( string name ) =>
+		Texture.CreateVolume( 1, 1, 1, ImageFormat.RGBA8888 )
+			.WithName( name )
+			.WithData( new byte[] { 128, 128, 128, 255 }, 4 )
+			.Finish();
+
+	public static Texture CreatePlaceholder2D( string name ) =>
+		Texture.Create( 1, 1, ImageFormat.RGBA8888 )
+			.WithName( name )
+			.WithData( new byte[] { 128, 128, 128, 255 }, 4 )
+			.Finish();
 }

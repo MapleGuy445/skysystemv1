@@ -183,7 +183,23 @@ Runs repeat within ~0.1 ms. Tilting toward the horizon barely changed the cost, 
 1. **Retune step counts per tier: done (2026-10-13).** User: 40 is the floor for High (lower is visibly worse). Result at the benchmark pose (Half, Temporal, 2052x914): **Low 0.49, Medium 0.57, High 0.89, Ultra 1.08 ms** (High was 4.09 ms at the start of Phase 5, 4.6x faster); High sky only 0.29, clouds only 0.70 ms. Details: with Temporal on (and Resolution not Full) view steps are Low 12 / Medium 20 / High 40 / Ultra 56; Temporal off keeps 16 / 32 / 64 / 96. Light steps unchanged (not jittered, so temporal does not help them). `ViewStepsOverride` (0 = auto) for A/B by eye; the benchmark logs steps per pass.
 2. **Depth-aware upsample (Step C)**: only needed if halos appear where geometry meets sky. User has not reported geometry halos (the cloud-edge fringe was the quarter-texel bug).
 3. **Empty-space skipping**: coarse pre-march to skip empty stretches of tall layers. Worth it if a cloudier/taller setup measures much slower than the benchmark pose.
-4. **Async noise bake**: Ultra/High bake is ~1.7 s on the main thread (start-up and quality changes).
+4. **Async noise bake: written (2026-10-13, awaiting check).** `CloudNoiseBaker.Bake*Data` (pure CPU, returns bytes) runs on `GameTask.RunInThreadAsync`; `Create*` uploads on the main thread when `EnsureNoise` sees the task complete. Old textures stay in use until the new ones are ready; a result for an outdated size is discarded. Before the first bake finishes, Render binds 1x1 placeholder noise and forces `layer_count` to 0, so the sky shows immediately and the clouds fade in through the temporal history.
+### Design notes (not implemented): depth-aware upsample and empty-space skipping
+
+**Depth-aware upsample (joint bilateral).**
+- Problem: each low-res texel is marched with the scene depth at one position (its center). Where a 2x2 block straddles sky and a near object, the blit's bilinear upsample mixes texels whose march stopped at very different distances, so cloud colour bleeds over object silhouettes (halo) or a gap appears next to them.
+- Fix: the trace also writes the scene depth it used (an R16F/R32F low-res "trace depth"; `CloudRay.sceneDist` is already computed). In the blit, fetch the 4 nearest low-res texels (one `Gather` per channel or 4 loads), and weight each by its bilinear weight times a depth-similarity weight, e.g. `w_i = bilinear_i / (eps + abs(zFull - z_i) / zFull)`. Normalize. If every weight is tiny (the full-res depth matches none of the four), fall back to the texel with the closest depth.
+- Better coverage of thin geometry: pick each low-res texel's depth sample with a checkerboard min/max pattern (alternate nearest and farthest of its 2x2 footprint), so both the object and the sky behind it are represented nearby.
+- Temporal: the history is already clamped to the current neighborhood, which handles most disocclusion at edges; the temporal pass could use the same depth weights when reading history if halos appear only in motion.
+- Cost: about 4 extra texture reads and a few ALU per full-res pixel, ~0.05 ms. Only worth doing if halos at geometry edges are visible.
+
+**Empty-space skipping.**
+- Problem: every view step evaluates `BaseCloudDensity` (weather map + per-cloud height slice + shape sample) even in clear air. A 5.3 km convective layer with coverage 0.35 and rare towers is mostly empty, so many of the 40 steps are wasted (the transmittance early-out only helps where clouds are thick).
+- A. Adaptive stepping inside `MarchClouds` (simple, local): after K consecutive zero-density samples, take steps 2 to 3x longer; on the first non-zero sample, step back one coarse step and continue at the fine size. Keeps the step budget; spends it where the clouds are. Risk: thin clouds skipped; keep K small and the coarse factor modest.
+- B. Cheaper "is there cloud here" test: `BaseCloudDensity` already returns early when coverage <= 0.01 or above the per-cloud top, before the expensive 3D shape sample. A coarse test that only uses the weather map and the height signal could drive A without touching the shape texture.
+- C. Ray bounds pre-pass: march at 1/8 resolution with ~8 cheap steps to find the first and last non-zero density per ray, dilate (min/max over neighbors) to be conservative, and let the trace march only `[tFirst - margin, tLast + margin]` with its full 40 steps. Also improves quality, because all steps land inside the cloud. Risk: thin clouds missed by the pre-pass pop in and out.
+- Expected gain: large in sparse skies (maybe 30 to 50% of the cloud cost), small in overcast skies. Measure a sparse and an overcast pose first; implement A, then C only if needed.
+
 5. Dropped: Low-tier 2D cloud dome (Low already costs ~0.5 ms), sky inside the trace pass (replaced by the sky-view LUT).
 6. Final per-tier table at a couple of poses (incl. a cloudier one) to close the phase.
 
