@@ -16,7 +16,7 @@ using System;
 //  Every noise wraps on all axes with an integer period, so textures tile
 //  without seams. Sample with a trilinear + WRAP sampler.
 //
-//  API CHECK: ImageFormat.RGBA8888, Texture.CreateVolume(...).WithData(byte[], int),
+//  Verified: ImageFormat.RGBA8888, Texture.CreateVolume(...).WithData(byte[], int),
 //  Texture.Create(w, h, format).WithData(...).
 //  System.Threading.Tasks.Parallel is blocked by the s&box whitelist, so this
 //  uses Sandbox.Utility.Parallel.For instead. Set UseParallel = false to bake

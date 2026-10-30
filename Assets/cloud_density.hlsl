@@ -16,7 +16,7 @@
 //  cloud's own normalized height, so small puffs and tall towers both get a
 //  proper base, body and top.
 //
-//  API CHECK: SamplerState attribute syntax (Filter / AddressU/V/W).
+//  Verified: SamplerState attribute syntax (Filter / AddressU/V/W).
 // ============================================================================
 
 Texture3D shapeNoise  < Attribute("ShapeNoise"); > ;

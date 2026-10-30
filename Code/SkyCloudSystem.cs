@@ -12,8 +12,8 @@ using System.Collections.Generic;
 //    * World Z is up. Layer altitudes are meters above GroundLevel.
 //    * Layers must not overlap in altitude (the shader assumes disjoint slabs).
 //
-//  Every spot that depends on an s&box API I could not verify is marked
-//  "API CHECK".
+//  s&box APIs this relies on were verified in the running engine (2026-10-30);
+//  new unverified assumptions should be marked "API CHECK".
 // ============================================================================
 
 public enum CloudQuality
@@ -180,10 +180,10 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 
 	// ---- Sun & time -------------------------------------------------------
 
-	/// <summary>API CHECK: DirectionalLight. Its rotation is driven when DriveSun is on.</summary>
+	/// <summary>DirectionalLight. Its rotation is driven when DriveSun is on.</summary>
 	[Property, Group( "Sun & Time" )] public DirectionalLight Sun { get; set; }
 
-	/// <summary>API CHECK: AmbientLight and its Color property. Optional.</summary>
+	/// <summary>AmbientLight and its Color property. Optional.</summary>
 	[Property, Group( "Sun & Time" )] public AmbientLight Ambient { get; set; }
 
 	/// <summary>On: this component moves the sun from TimeOfDay. Off: it reads the sun's current rotation.</summary>
@@ -404,7 +404,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	/// thread) once it finishes. Until then the previous textures stay in use;
 	/// on the very first bake Render uses 1x1 placeholders and draws no clouds.
 	/// A result for an outdated size (quality changed mid-bake) is discarded.
-	/// API CHECK: GameTask.RunInThreadAsync, Task.IsCompleted / Result in the whitelist.
+	/// Verified: GameTask.RunInThreadAsync, Task.IsCompleted / Result in the whitelist.
 	/// </summary>
 	void EnsureNoise()
 	{
@@ -477,7 +477,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 			_sunDir = SunDirectionFromTime();
 
 			// A directional light shines along its Forward, so look AWAY from the sun.
-			// API CHECK: Rotation.LookAt( Vector3 )
+			// Verified: Rotation.LookAt( Vector3 )
 			if ( Sun is not null )
 				Sun.WorldRotation = Rotation.LookAt( -_sunDir );
 		}
@@ -530,7 +530,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 
 			if ( Ambient is not null )
 			{
-				// API CHECK: AmbientLight.Color
+				// Verified: AmbientLight.Color
 				Ambient.Color = new Color( _ambientTop.x, _ambientTop.y, _ambientTop.z );
 			}
 		}
@@ -587,7 +587,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		for ( int i = count; i < MaxLayers; i++ )
 			_layerData[i] = default;
 
-		// API CHECK: GpuBuffer<T> as a StructuredBuffer attribute in a post process blit.
+		// Verified: GpuBuffer<T> as a StructuredBuffer attribute in a post process blit.
 		_layerBuffer ??= new GpuBuffer<CloudLayerGpu>( MaxLayers );
 		_layerBuffer.SetData( _layerData );
 		return count;
@@ -600,7 +600,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	// The compute pass is recorded in its own command list, inserted just before
 	// the blit, so every shared attribute is set on both (see SetShared overloads).
 	//
-	// API CHECK: CommandList.Attributes.Set for Texture (3D), GpuBuffer and
+	// Verified: CommandList.Attributes.Set for Texture (3D), GpuBuffer and
 	// Vector2/3/4 (float and 2D Texture confirmed by the Phase 5 spike).
 
 	ComputeShader _traceCs;
@@ -655,7 +655,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 			_historyA = CreateUavTexture( "cloud_history_a", w, h );
 			_historyB = CreateUavTexture( "cloud_history_b", w, h );
 			// Region size each resolve was written with (2 slots, ping-pong); zero = none.
-			// API CHECK: GpuBuffer<Vector4> bound as RWStructuredBuffer<float4>.
+			// Verified: GpuBuffer<Vector4> bound as RWStructuredBuffer<float4>.
 			_sizeState = new GpuBuffer<Vector4>( 2 );
 			_sizeState.SetData( new[] { Vector4.Zero, Vector4.Zero } );
 			_cloudW = w;
@@ -669,7 +669,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		_traceCs ??= new ComputeShader( "cloud_trace_cs" );
 		_temporalCs ??= new ComputeShader( "cloud_temporal_cs" );
 
-		// API CHECK: engine blue noise texture path and that it reads as linear 0..1 in .r.
+		// Verified: engine blue noise texture path and that it reads as linear 0..1 in .r.
 		_blueNoise ??= Texture.Load( "textures/dev/blue_noise_256.vtex" );
 
 		// History is invalid after a toggle, a resize, or a camera teleport.
@@ -698,7 +698,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		var write = (_frameIndex & 1) == 0 ? _historyA : _historyB;
 		var read = (_frameIndex & 1) == 0 ? _historyB : _historyA;
 
-		// API CHECK: UavBarrier so the temporal pass sees the trace's writes
+		// Verified: UavBarrier so the temporal pass sees the trace's writes
 		// (compute -> compute in one command list; the spike only proved
 		// compute -> pixel and frame-to-frame).
 		_traceCl.UavBarrier( _cloudTex );
@@ -857,7 +857,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		SetShared( "debug_mode", (float)(int)DebugView );
 
 		// --- Baked noise ---
-		// API CHECK: Attributes.Set( string, Texture ) for 2D and 3D textures.
+		// Verified: Attributes.Set( string, Texture ) for 2D and 3D textures.
 		SetShared( "ShapeNoise", hasNoise ? _shapeNoise : _placeholder3D );
 		SetShared( "DetailNoise", hasNoise ? _detailNoise : _placeholder3D );
 		SetShared( "WeatherMap", hasNoise ? _weatherMap : _placeholder2D );

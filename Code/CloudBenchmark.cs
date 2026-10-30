@@ -18,8 +18,8 @@ using System.Linq;
 //
 //  Changes happen on the play-mode scene only; nothing is saved.
 //
-//  API CHECK: Sandbox.Diagnostics.PerformanceStats.GpuFrametime / GpuFrameNumber
-//  (static), Screen.Size.
+//  Verified: Sandbox.Diagnostics.PerformanceStats.GpuFrametime / GpuFrameNumber
+//  (static). Screen.Size is NOT the render size in the editor; the logged size is indicative only.
 // ============================================================================
 
 public sealed class CloudBenchmark : Component

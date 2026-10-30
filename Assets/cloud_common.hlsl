@@ -526,8 +526,11 @@ float4 MarchClouds(CloudRay r, float jitter, out float cloudDist)
             float uOut = log(t.y / ANCHOR_A + 1.0);
 
             // Power-of-two refinement so this layer gets about 'steps' cells.
+            // Rounded to the NEAREST power of two (0.7x to 1.4x steps, ~1x on
+            // average); rounding up gave 1x to 2x and cost ~36% more than the
+            // per-layer schedule at the same tier (benchmark 2026-10-30).
             float wantDu = max((uOut - uIn) / steps, 0.000001);
-            float sub = exp2(clamp(ceil(log2(du / wantDu)), 0.0, 4.0));
+            float sub = exp2(clamp(round(log2(du / wantDu)), 0.0, 4.0));
             float duL = du / sub;
 
             int k0 = (int)floor(uIn / duL);

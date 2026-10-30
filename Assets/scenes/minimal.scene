@@ -45,7 +45,7 @@
       "Flags": 0,
       "Name": "Sun",
       "Position": "0,0,0",
-      "Rotation": "0.0248732697,0.0255284812,-0.697412133,0.715783417",
+      "Rotation": "0.121910214,0.140810236,-0.64309305,0.742793143",
       "Scale": "1,1,1",
       "Tags": "light_directional,light",
       "Enabled": true,
@@ -106,7 +106,7 @@
           "FogStrength": 1,
           "IncludeStaticShadowCasters": false,
           "Intensity": 1,
-          "LightColor": "0.6011,0.29137,0.09317,1",
+          "LightColor": "0.88726,0.72147,0.52815,1",
           "MixedShadows": false,
           "OnComponentDestroy": null,
           "OnComponentDisabled": null,
@@ -128,7 +128,7 @@
           "__guid": "7eec6cd9-1af7-4075-981e-5eff2e56b6c0",
           "__enabled": true,
           "Flags": 0,
-          "Color": "0.14083,0.14428,0.23875,1",
+          "Color": "0.21984,0.34707,0.66351,1",
           "OnComponentDestroy": null,
           "OnComponentDisabled": null,
           "OnComponentEnabled": null,
@@ -266,7 +266,7 @@
           },
           "AmbientIntensity": 1,
           "CloudExposure": 0.6,
-          "DayLengthSeconds": 2000,
+          "DayLengthSeconds": 0,
           "DebugView": "Off",
           "DriveSun": true,
           "ExtinctionPerMeter": 0.015,
@@ -290,7 +290,7 @@
               "WeatherInfluence": 0.7880435,
               "DetailStrength": 0.6,
               "WindDirectionDegrees": 0,
-              "WindSpeed": 0
+              "WindSpeed": 100
             },
             {
               "Enabled": true,
@@ -307,7 +307,7 @@
               "WeatherInfluence": 0.46195653,
               "DetailStrength": 0.6,
               "WindDirectionDegrees": 0,
-              "WindSpeed": 5
+              "WindSpeed": 100
             }
           ],
           "MaxCloudDistanceKm": 200,
@@ -343,7 +343,7 @@
           "SyncSceneLights": true,
           "Temporal": true,
           "TemporalBlend": 0.9,
-          "TimeOfDay": 6.289857,
+          "TimeOfDay": 7.5281143,
           "ViewStepsOverride": 0
         }
       ],
