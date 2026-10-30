@@ -253,7 +253,7 @@ PS
         // TODO Phase 5: depth-aware upsample (bilinear can leak at geometry edges).
         float4 clouds;
         if (cloud_lowres > 0.5)
-            clouds = CloudTex.SampleLevel(g_sBilinearMirror, uv, 0);
+            clouds = CloudTex.SampleLevel(g_sBilinearMirror, CloudTexUv(uv, CloudTraceSize()), 0);
         else
         {
             float cloudDist;

@@ -32,13 +32,14 @@ CS
     RWTexture2D<float>  CloudDepthOut < Attribute("CloudDepthOut"); > ;
     Texture2D<float4>   BlueNoise     < Attribute("BlueNoise"); > ;
 
-    float2 cloud_size  < Attribute("cloud_size"); > ;   // low-res target size (pixels)
     float  frame_index < Attribute("frame_index"); > ;  // 0 when temporal accumulation is off
     float  jitter_mode < Attribute("jitter_mode"); > ;  // see MainCs
 
+    // Dispatched over the whole texture capacity; only the region for this view is used.
     [numthreads(8, 8, 1)]
     void MainCs(uint3 id : SV_DispatchThreadID)
     {
+        float2 cloud_size = CloudTraceSize();
         if (id.x >= (uint)cloud_size.x || id.y >= (uint)cloud_size.y)
             return;
 

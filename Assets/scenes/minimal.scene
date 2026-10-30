@@ -45,7 +45,7 @@
       "Flags": 0,
       "Name": "Sun",
       "Position": "0,0,0",
-      "Rotation": "0.00251786062,0.00252440432,-0.70618403,0.708019376",
+      "Rotation": "0.0248732697,0.0255284812,-0.697412133,0.715783417",
       "Scale": "1,1,1",
       "Tags": "light_directional,light",
       "Enabled": true,
@@ -60,11 +60,54 @@
           "__guid": "d3659344-a90d-48fa-927a-095f70fe041f",
           "__enabled": true,
           "Flags": 0,
+          "__version": 1,
+          "AnimationCurve": [
+            {
+              "x": 0,
+              "y": 0,
+              "in": 0,
+              "out": 0,
+              "mode": "Mirrored"
+            },
+            {
+              "x": 0.5,
+              "y": 1,
+              "in": 0,
+              "out": 0,
+              "mode": "Mirrored"
+            },
+            {
+              "x": 1,
+              "y": 0,
+              "in": 0,
+              "out": 0,
+              "mode": "Mirrored"
+            }
+          ],
+          "AnimationDuration": 2,
+          "AnimationEnabled": false,
+          "AnimationGradient": {
+            "blend": "Linear",
+            "color": [
+              {
+                "t": 0.5,
+                "c": "1,1,1,1"
+              }
+            ],
+            "alpha": []
+          },
+          "AnimationPattern": "Flicker",
+          "AnimationSpeed": 1,
+          "AnimationTimeOffset": 0,
+          "BakeLightIndex": -1,
           "ContactShadows": true,
           "Contribution": "Diffuse, Specular, Transmissive",
           "FogMode": "Enabled",
           "FogStrength": 1,
-          "LightColor": "0.04228,0.00513,0.00006,1",
+          "IncludeStaticShadowCasters": false,
+          "Intensity": 1,
+          "LightColor": "0.6011,0.29137,0.09317,1",
+          "MixedShadows": false,
           "OnComponentDestroy": null,
           "OnComponentDisabled": null,
           "OnComponentEnabled": null,
@@ -77,6 +120,7 @@
           "ShadowHardness": 0,
           "Shadows": true,
           "SkyColor": "0.2532,0.32006,0.35349,1",
+          "Temperature": 6500,
           "Visualizer": {}
         },
         {
@@ -84,7 +128,7 @@
           "__guid": "7eec6cd9-1af7-4075-981e-5eff2e56b6c0",
           "__enabled": true,
           "Flags": 0,
-          "Color": "0.0698,0.06795,0.11297,1",
+          "Color": "0.14083,0.14428,0.23875,1",
           "OnComponentDestroy": null,
           "OnComponentDisabled": null,
           "OnComponentEnabled": null,
@@ -100,7 +144,7 @@
       "__version": 2,
       "Flags": 0,
       "Name": "Camera",
-      "Position": "10524.1953,-379.653259,2456.30884",
+      "Position": "-17574.4375,-379.661652,111235.117",
       "Rotation": "3.74714482E-08,-0.126055911,1.80529758E-09,0.99202311",
       "Scale": "1,1,1",
       "Tags": "",
@@ -222,7 +266,7 @@
           },
           "AmbientIntensity": 1,
           "CloudExposure": 0.6,
-          "DayLengthSeconds": 0,
+          "DayLengthSeconds": 2000,
           "DebugView": "Off",
           "DriveSun": true,
           "ExtinctionPerMeter": 0.015,
@@ -278,13 +322,14 @@
           "OnComponentUpdate": null,
           "Quality": "Ultra",
           "ReplaceSky": true,
-          "Resolution": "Full",
+          "Resolution": "Half",
           "SceneSunIntensity": 1,
           "SkyExposure": 2,
           "SkySunIntensity": 13,
           "StarBrightness": 1,
           "StarDensity": 1.6992753,
           "StarSize": 1.4,
+          "StepSchedule": "CameraAnchored",
           "Sun": {
             "_type": "component",
             "component_id": "d3659344-a90d-48fa-927a-095f70fe041f",
@@ -298,7 +343,7 @@
           "SyncSceneLights": true,
           "Temporal": true,
           "TemporalBlend": 0.9,
-          "TimeOfDay": 6.028986,
+          "TimeOfDay": 6.289857,
           "ViewStepsOverride": 0
         }
       ],
@@ -587,11 +632,55 @@
           "__guid": "43f03a69-b39c-4a9c-9991-40b9b490088e",
           "__enabled": true,
           "Flags": 0,
+          "__version": 1,
+          "AnimationCurve": [
+            {
+              "x": 0,
+              "y": 0,
+              "in": 0,
+              "out": 0,
+              "mode": "Mirrored"
+            },
+            {
+              "x": 0.5,
+              "y": 1,
+              "in": 0,
+              "out": 0,
+              "mode": "Mirrored"
+            },
+            {
+              "x": 1,
+              "y": 0,
+              "in": 0,
+              "out": 0,
+              "mode": "Mirrored"
+            }
+          ],
+          "AnimationDuration": 2,
+          "AnimationEnabled": false,
+          "AnimationGradient": {
+            "blend": "Linear",
+            "color": [
+              {
+                "t": 0.5,
+                "c": "1,1,1,1"
+              }
+            ],
+            "alpha": []
+          },
+          "AnimationPattern": "Flicker",
+          "AnimationSpeed": 1,
+          "AnimationTimeOffset": 0,
           "Attenuation": 1.4691943,
+          "BakeLightIndex": -1,
+          "ConstantAttenuation": 0,
           "Contribution": "Diffuse, Specular, Transmissive",
           "FogMode": "Enabled",
           "FogStrength": 1,
+          "Intensity": 1,
           "LightColor": "0.91373,0.98039,1,1",
+          "LinearAttenuation": 0,
+          "MixedShadows": false,
           "OnComponentDestroy": null,
           "OnComponentDisabled": null,
           "OnComponentEnabled": null,
@@ -601,7 +690,8 @@
           "Radius": 10000,
           "ShadowBias": 0,
           "ShadowHardness": 0,
-          "Shadows": true
+          "Shadows": true,
+          "Temperature": 6500
         }
       ],
       "Children": []
@@ -627,14 +717,56 @@
           "__guid": "5eb1f83b-1af9-4dc5-bcb9-0e3b76a58319",
           "__enabled": true,
           "Flags": 0,
+          "__version": 1,
+          "AnimationCurve": [
+            {
+              "x": 0,
+              "y": 0,
+              "in": 0,
+              "out": 0,
+              "mode": "Mirrored"
+            },
+            {
+              "x": 0.5,
+              "y": 1,
+              "in": 0,
+              "out": 0,
+              "mode": "Mirrored"
+            },
+            {
+              "x": 1,
+              "y": 0,
+              "in": 0,
+              "out": 0,
+              "mode": "Mirrored"
+            }
+          ],
+          "AnimationDuration": 2,
+          "AnimationEnabled": false,
+          "AnimationGradient": {
+            "blend": "Linear",
+            "color": [
+              {
+                "t": 0.5,
+                "c": "1,1,1,1"
+              }
+            ],
+            "alpha": []
+          },
+          "AnimationPattern": "Flicker",
+          "AnimationSpeed": 1,
+          "AnimationTimeOffset": 0,
           "Attenuation": 0,
+          "BakeLightIndex": -1,
           "ConeInner": 90,
           "ConeOuter": 44.57346,
           "Contribution": "Diffuse, Specular, Transmissive",
           "Cookie": null,
           "FogMode": "Enabled",
           "FogStrength": 1,
+          "Intensity": 1,
           "LightColor": "0.91373,0.98039,1,1",
+          "MixedShadows": false,
           "OnComponentDestroy": null,
           "OnComponentDisabled": null,
           "OnComponentEnabled": null,
@@ -644,7 +776,8 @@
           "Radius": 1000000,
           "ShadowBias": 0,
           "ShadowHardness": 0,
-          "Shadows": true
+          "Shadows": true,
+          "Temperature": 6500
         }
       ],
       "Children": []

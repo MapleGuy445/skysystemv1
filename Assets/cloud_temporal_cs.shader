@@ -34,21 +34,33 @@ CS
     Texture2D<float4>   CloudHistory  < Attribute("CloudHistory"); > ;
     RWTexture2D<float4> CloudResolved < Attribute("CloudResolved"); > ;
 
-    float2 cloud_size     < Attribute("cloud_size"); > ;
     float  temporal_blend < Attribute("temporal_blend"); > ;  // history weight, e.g. 0.9
     float  has_history    < Attribute("has_history"); > ;     // 0 on the first frame / after a reset
 
+    // Region size of each frame's resolve, two slots used alternately: this
+    // frame writes slot size_slot and reads the other one, so the history is
+    // sampled at the size it was written with even if the view size changed.
+    RWStructuredBuffer<float4> CloudSizeState < Attribute("CloudSizeState"); > ;
+    float size_slot < Attribute("size_slot"); > ;
+
+    // Dispatched over the whole texture capacity; only the region for this view is used.
     [numthreads(8, 8, 1)]
     void MainCs(uint3 id : SV_DispatchThreadID)
     {
+        float2 cloud_size = CloudTraceSize();
         int2 size = int2(cloud_size);
         int2 px = int2(id.xy);
         if (px.x >= size.x || px.y >= size.y)
             return;
 
+        uint slot = size_slot > 0.5 ? 1u : 0u;
+        float2 prevSize = CloudSizeState[1u - slot].xy;
+        if (px.x == 0 && px.y == 0)
+            CloudSizeState[slot] = float4(cloud_size, 0.0, 0.0);
+
         float4 cur = CloudCurrent[px];
 
-        if (has_history < 0.5)
+        if (has_history < 0.5 || prevSize.x < 1.0 || prevSize.y < 1.0)
         {
             CloudResolved[px] = cur;
             return;
@@ -89,7 +101,7 @@ CS
             return;
         }
 
-        float4 hist = CloudHistory.SampleLevel(g_sBilinearClamp, prevUv, 0);
+        float4 hist = CloudHistory.SampleLevel(g_sBilinearClamp, CloudTexUv(prevUv, prevSize), 0);
         hist = clamp(hist, lo, hi);
 
         // Trust history less for clouds near the camera (fast parallax).

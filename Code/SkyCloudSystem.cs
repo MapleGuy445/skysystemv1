@@ -24,12 +24,19 @@ public enum CloudQuality
 	Ultra
 }
 
-/// <summary>Resolution the clouds are marched at (divisor per axis). Full = the old per-pixel path in the blit.</summary>
+/// <summary>Resolution the clouds are marched at (divisor per axis), in the compute trace + temporal pipeline.</summary>
 public enum CloudResolution
 {
 	Full = 1,
 	Half = 2,
 	Quarter = 4
+}
+
+/// <summary>How view-march samples are placed along a ray (see SkyCloudSystem.StepSchedule).</summary>
+public enum CloudStepSchedule
+{
+	PerLayer = 0,
+	CameraAnchored = 1
 }
 
 /// <summary>Jitter source for the cloud march when temporal accumulation is on.</summary>
@@ -230,10 +237,19 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	[Property, Group( "Quality" )] public CloudQuality Quality { get; set; } = CloudQuality.High;
 	[Property, Group( "Quality" ), Range( 5, 200 )] public float MaxCloudDistanceKm { get; set; } = 40f;
 
+	/// <summary>
+	/// Where view-march samples are placed. CameraAnchored: one schedule measured from
+	/// the camera (spacing grows with distance), shared by all layers; stable under
+	/// camera motion and covers the full distance with a budget of 2x the tier's steps.
+	/// PerLayer: the original scheme, each layer's steps placed from where the ray
+	/// enters it (crawling stripes on near-horizontal rays when the camera moves).
+	/// </summary>
+	[Property, Group( "Quality" )] public CloudStepSchedule StepSchedule { get; set; } = CloudStepSchedule.CameraAnchored;
+
 	/// <summary>Half = clouds marched at half width and height (1/4 of the pixels) in a compute pass, then upsampled.</summary>
 	[Property, Group( "Quality" )] public CloudResolution Resolution { get; set; } = CloudResolution.Half;
 
-	/// <summary>Blend each frame's low-res clouds with the reprojected previous result (needs Resolution Half or Quarter). Removes the per-pixel grain.</summary>
+	/// <summary>Blend each frame's low-res clouds with the reprojected previous result. Removes the per-pixel grain at every resolution.</summary>
 	[Property, Group( "Quality" )] public bool Temporal { get; set; } = true;
 
 	/// <summary>0 = use the tier's step count (lower when Temporal is on). Otherwise forces the view-march steps per layer, for comparing by eye.</summary>
@@ -313,7 +329,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	/// <summary>View-march steps per layer actually used this frame (tier table, temporal-aware, or the override).</summary>
 	public int ViewSteps => ViewStepsOverride > 0
 		? ViewStepsOverride
-		: StepsFor( Quality, Temporal && Resolution != CloudResolution.Full );
+		: StepsFor( Quality, Temporal );
 
 	static int LightStepsFor( CloudQuality q ) => q switch
 	{
@@ -593,6 +609,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	Texture _cloudTex;      // this frame's trace (rgb premultiplied colour, a transmittance)
 	Texture _cloudDepth;    // this frame's cloud distance (m), -1 = none
 	Texture _historyA, _historyB; // resolved results, ping-pong
+	GpuBuffer<Vector4> _sizeState; // region size each resolve was written with (see cloud_temporal_cs)
 	Texture _blueNoise;
 	int _cloudW, _cloudH;
 
@@ -603,19 +620,29 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	void SetShared( string name, float v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
 	void SetShared( string name, Vector3 v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
 	void SetShared( string name, Vector4 v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
+	void SetShared( string name, Vector2 v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
 	void SetShared( string name, Texture v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
 	void SetShared( string name, GpuBuffer<CloudLayerGpu> v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
 
 	/// <summary>Records the trace dispatch (all shared attributes must already be set).</summary>
 	void RecordTrace()
 	{
+		// Textures are allocated at a CAPACITY, not at the view size: Screen.Size is
+		// not the render size in the editor (it read 3456x1409 and later 160x29 for
+		// the same viewport). The shaders derive the region actually used from the
+		// view they render (CloudTraceSize in cloud_common.hlsl); a view larger than
+		// the capacity is traced at a lower resolution rather than breaking.
 		int div = (int)Resolution;
-		int w = Math.Max( 1, (int)MathF.Ceiling( Screen.Size.x / div ) );
-		int h = Math.Max( 1, (int)MathF.Ceiling( Screen.Size.y / div ) );
+		// Full resolution: cap the capacity lower (2560x1440, ~100 MB of targets
+		// instead of ~230 MB at 4K); larger views are traced slightly below full res.
+		float capW = div == 1 ? FullCapacityWidth : CapacityWidth;
+		float capH = div == 1 ? FullCapacityHeight : CapacityHeight;
+		int w = Math.Max( 1, (int)MathF.Ceiling( MathF.Max( Screen.Size.x, capW ) / div ) );
+		int h = Math.Max( 1, (int)MathF.Ceiling( MathF.Max( Screen.Size.y, capH ) / div ) );
 
 		// Check every target, not just one: after a hot reload, fields added by the
 		// new code start out null while the old ones are still allocated.
-		bool missing = _cloudTex is null || _cloudDepth is null || _historyA is null || _historyB is null;
+		bool missing = _cloudTex is null || _cloudDepth is null || _historyA is null || _historyB is null || _sizeState is null;
 		if ( missing || w != _cloudW || h != _cloudH )
 		{
 			DisposeCloudTargets();
@@ -627,10 +654,17 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 				.Finish();
 			_historyA = CreateUavTexture( "cloud_history_a", w, h );
 			_historyB = CreateUavTexture( "cloud_history_b", w, h );
+			// Region size each resolve was written with (2 slots, ping-pong); zero = none.
+			// API CHECK: GpuBuffer<Vector4> bound as RWStructuredBuffer<float4>.
+			_sizeState = new GpuBuffer<Vector4>( 2 );
+			_sizeState.SetData( new[] { Vector4.Zero, Vector4.Zero } );
 			_cloudW = w;
 			_cloudH = h;
 			_historyValid = false;
 		}
+
+		SetShared( "cloud_div", (float)div );
+		SetShared( "cloud_capacity", new Vector2( w, h ) );
 
 		_traceCs ??= new ComputeShader( "cloud_trace_cs" );
 		_temporalCs ??= new ComputeShader( "cloud_temporal_cs" );
@@ -650,7 +684,6 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		_traceCl.Attributes.Set( "CloudOut", _cloudTex );
 		_traceCl.Attributes.Set( "CloudDepthOut", _cloudDepth );
 		_traceCl.Attributes.Set( "BlueNoise", _blueNoise );
-		_traceCl.Attributes.Set( "cloud_size", new Vector2( w, h ) );
 		_traceCl.Attributes.Set( "frame_index", Temporal ? (float)_frameIndex : 0f );
 		_traceCl.Attributes.Set( "jitter_mode", Temporal ? (float)(int)Jitter : 0f );
 		_traceCl.DispatchCompute( _traceCs, w, h, 1 );
@@ -677,6 +710,8 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		_traceCl.Attributes.Set( "CloudResolved", write );
 		_traceCl.Attributes.Set( "temporal_blend", TemporalBlend );
 		_traceCl.Attributes.Set( "has_history", _historyValid ? 1f : 0f );
+		_traceCl.Attributes.Set( "CloudSizeState", _sizeState );
+		_traceCl.Attributes.Set( "size_slot", (float)(_frameIndex & 1) );
 		_traceCl.DispatchCompute( _temporalCs, w, h, 1 );
 
 		_historyValid = true;
@@ -693,7 +728,16 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		_historyA?.Dispose();
 		_historyB?.Dispose();
 		_cloudTex = _cloudDepth = _historyA = _historyB = null;
+		_sizeState?.Dispose();
+		_sizeState = null;
 	}
+
+	// Minimum capacity of the low-res targets (before dividing by Resolution):
+	// covers views up to 4K even when Screen.Size reports something smaller.
+	const float CapacityWidth = 3840f;
+	const float CapacityHeight = 2160f;
+	const float FullCapacityWidth = 2560f;
+	const float FullCapacityHeight = 1440f;
 
 	// ---- Sky-view LUT (Phase 5) ---------------------------------------------
 	//
@@ -802,6 +846,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		SetShared( "ground_z", GroundLevel * InchToMeter );
 		SetShared( "max_cloud_distance", MaxCloudDistanceKm * 1000f );
 		SetShared( "extinction", ExtinctionPerMeter );
+		SetShared( "step_schedule", (float)(int)StepSchedule );
 
 		// (The camera far plane comes from the engine's g_flFarPlane in the shader.)
 
@@ -825,15 +870,15 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		SetShared( "layer_count", (float)layerCount );
 
 		// --- Compute passes, recorded in one command list that runs before the blit ---
-		bool lowRes = Resolution != CloudResolution.Full;
-		Attributes.Set( "cloud_lowres", lowRes ? 1f : 0f );
+		// Every resolution, Full included, goes through the compute trace (+ temporal),
+		// so Full also gets blue-noise jitter and temporal accumulation. The blit's
+		// per-pixel march (cloud_lowres = 0) is no longer used.
+		Attributes.Set( "cloud_lowres", 1f );
 
 		if ( ReplaceSky )
 			RecordSkyLut();
-		if ( lowRes )
-			RecordTrace();
-		if ( ReplaceSky || lowRes )
-			InsertCommandList( _traceCl, Stage.AfterPostProcess, 199, "cloud_compute" );
+		RecordTrace();
+		InsertCommandList( _traceCl, Stage.AfterPostProcess, 199, "cloud_compute" );
 
 		var shader = _material;
 		var blit = BlitMode.WithBackbuffer( shader, Stage.AfterPostProcess, 200, false );
