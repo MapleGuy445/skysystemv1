@@ -79,6 +79,9 @@ public sealed class CloudLayerSettings
 	/// <summary>How much the tallest clouds spread out into an anvil near the layer top.</summary>
 	[Property, Range( 0, 1 )] public float Anvil { get; set; } = 0f;
 
+	/// <summary>How tall clouds can grow above the layer bottom, in meters (clamped to the layer). Fair-weather cumulus ~1500, towering ~5000, storms the whole layer.</summary>
+	[Property, Range( 100, 20000 )] public float CloudHeightMeters { get; set; } = 20000f;
+
 	// ---- Noise scales: "tiles per km" = how many times the texture repeats per kilometer ----
 
 	/// <summary>Base cloud form. 0.12 = the shape texture repeats every ~8 km.</summary>
@@ -132,7 +135,7 @@ static class AtmosphereCpu
 	static readonly double[] BetaO = { 0.65e-3, 1.881e-3, 0.085e-3 };
 
 	/// <summary>Per-channel transmittance of sunlight at a given altitude (km) and sun elevation (sine of the angle).</summary>
-	public static Vector3 SunTransmittance( double altKm, double sinElev )
+	public static Vector3 SunTransmittance( double altKm, double sinElev, double mieScale = 1.0 )
 	{
 		double ce = Math.Sqrt( Math.Max( 0.0, 1.0 - sinElev * sinElev ) );
 		double oz = PlanetR + altKm;
@@ -163,9 +166,10 @@ static class AtmosphereCpu
 			odO += Math.Max( 0.0, 1.0 - Math.Abs( h - 25.0 ) / 15.0 ) * ds;
 		}
 
-		float r = (float)Math.Exp( -(BetaR[0] * odR + BetaMExt * odM + BetaO[0] * odO) );
-		float g = (float)Math.Exp( -(BetaR[1] * odR + BetaMExt * odM + BetaO[1] * odO) );
-		float bl = (float)Math.Exp( -(BetaR[2] * odR + BetaMExt * odM + BetaO[2] * odO) );
+		double m = BetaMExt * mieScale * odM;
+		float r = (float)Math.Exp( -(BetaR[0] * odR + m + BetaO[0] * odO) );
+		float g = (float)Math.Exp( -(BetaR[1] * odR + m + BetaO[1] * odO) );
+		float bl = (float)Math.Exp( -(BetaR[2] * odR + m + BetaO[2] * odO) );
 		return new Vector3( r, g, bl );
 	}
 }
@@ -295,9 +299,21 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 
 	Material _material; // cached, created lazily
 
+	/// <summary>
+	/// Weather in effect, set every frame by a WeatherSystem (null = none). While set,
+	/// it replaces the per-layer coverage, density, cloud type, height variation, anvil
+	/// and wind, and scales extinction, sun, cloud ambient and haze. Layer altitudes
+	/// and noise settings still come from Layers.
+	/// </summary>
+	public WeatherState Weather { get; set; }
+
 	GpuBuffer<CloudLayerGpu> _layerBuffer;
-	readonly CloudLayerGpu[] _layerData = new CloudLayerGpu[MaxLayers];
-	readonly List<CloudLayerSettings> _activeLayers = new();
+	// Created on first use: this engine's hot reload can leave initialized fields
+	// null on an existing component (seen on _activeLayers, WeatherSystem.Current).
+	CloudLayerGpu[] _layerDataStore;
+	List<CloudLayerSettings> _activeLayersStore;
+	CloudLayerGpu[] _layerData => _layerDataStore ??= new CloudLayerGpu[MaxLayers];
+	List<CloudLayerSettings> _activeLayers => _activeLayersStore ??= new();
 
 	Texture _shapeNoise;
 	Texture _detailNoise;
@@ -509,7 +525,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		for ( int i = 0; i < SunLutSize; i++ )
 		{
 			double altKm = Math.Max( i * SunLutTopMeters / (SunLutSize - 1) * 0.001, 0.0005 );
-			var t = AtmosphereCpu.SunTransmittance( altKm, e );
+			var t = AtmosphereCpu.SunTransmittance( altKm, e, Weather?.Haze ?? 1f );
 			_sunLutData[i] = new Vector4( t.x, t.y, t.z, 0f );
 		}
 
@@ -517,7 +533,10 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		var tGround = new Vector3( _sunLutData[0].x, _sunLutData[0].y, _sunLutData[0].z );
 		Vector3 sunTinted = Mul( Rgb( SunColor ), tGround );
 
-		_sunLight = Rgb( SunColor ) * SunIntensity; // untinted; the shader applies the per-altitude tint
+		// Overcast: less direct sunlight on clouds and on the scene.
+		float sunKeep = 1f - Math.Clamp( Weather?.SunDimming ?? 0f, 0f, 1f );
+
+		_sunLight = Rgb( SunColor ) * (SunIntensity * sunKeep); // untinted; the shader applies the per-altitude tint
 
 		// ---- Ambient: day/night + warm twilight ----
 		float dayK = SmoothStep( -0.08f, 0.25f, e );
@@ -534,8 +553,9 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		Vector3 ambBottom = ambTop * 0.3f
 			+ Mul( Rgb( GroundAlbedo ), sunTinted ) * (Math.Clamp( e, 0f, 1f ) * 0.35f);
 
-		_ambientTop = ambTop * AmbientIntensity;
-		_ambientBottom = ambBottom * AmbientIntensity;
+		float cloudAmbient = AmbientIntensity * (Weather?.CloudAmbientScale ?? 1f);
+		_ambientTop = ambTop * cloudAmbient;
+		_ambientBottom = ambBottom * cloudAmbient;
 
 		// ---- Push the result into the scene's own lighting ----
 		// Note: below the horizon the sun light goes black (no moonlight yet).
@@ -543,7 +563,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		{
 			if ( Sun is not null )
 			{
-				var c = sunTinted * SceneSunIntensity;
+				var c = sunTinted * (SceneSunIntensity * sunKeep);
 				Sun.LightColor = new Color( c.x, c.y, c.z );
 			}
 
@@ -565,12 +585,27 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	/// so a layer that overlaps the one below it is skipped (with a warning).
 	/// Returns how many layers were uploaded.
 	/// </summary>
+	/// <summary>A layer's look: from the weather when a WeatherSystem drives it, else its own settings.</summary>
+	(float Coverage, float Density, float CloudType, float HeightVariation, float Anvil, float CloudHeight) LookOf( CloudLayerSettings l, int index )
+	{
+		var w = Weather;
+		if ( w is not null && index >= 0 && index < w.LayerCount )
+			return (w.Coverage[index], w.Density[index], w.CloudType[index], w.HeightVariation[index], w.Anvil[index], w.CloudHeight[index]);
+		if ( w is not null )
+			return (0f, 0f, l.CloudType, l.HeightVariation, l.Anvil, l.CloudHeightMeters); // weather has no entry for this layer: clear
+		return (l.Coverage, l.Density, l.CloudType, l.HeightVariation, l.Anvil, l.CloudHeightMeters);
+	}
+
 	int UploadLayers()
 	{
+		// Weather values are matched to Layers by list index (before sorting).
 		_activeLayers.Clear();
-		foreach ( var l in Layers )
+		for ( int i = 0; i < Layers.Count; i++ )
 		{
-			if ( l is not null && l.Enabled && l.TopMeters > l.BottomMeters && l.Coverage > 0f && l.Density > 0f )
+			var l = Layers[i];
+			if ( l is null ) continue;
+			var look = LookOf( l, i );
+			if ( l.Enabled && l.TopMeters > l.BottomMeters && look.Coverage > 0f && look.Density > 0f )
 				_activeLayers.Add( l );
 		}
 		_activeLayers.Sort( ( a, b ) => a.BottomMeters.CompareTo( b.BottomMeters ) );
@@ -593,12 +628,15 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 			}
 			prevTop = l.TopMeters;
 
+			var look = LookOf( l, Layers.IndexOf( l ) );
 			_layerData[count++] = new CloudLayerGpu
 			{
-				Range = new Vector4( l.BottomMeters, l.TopMeters, l.Coverage, l.Density ),
+				Range = new Vector4( l.BottomMeters, l.TopMeters, look.Coverage, look.Density ),
 				Params = new Vector4( l.ShapeTilesPerKm / 1000f, l.WindOffset.x, l.WindOffset.y, l.DetailStrength ),
 				Noise = new Vector4( l.DetailTilesPerKm / 1000f, l.WeatherTilesPerKm / 1000f, l.WeatherInfluence, 0 ),
-				Shape = new Vector4( l.CloudType, l.HeightVariation, l.Anvil, 0 ),
+				// w: cloud height as a fraction of this layer
+				Shape = new Vector4( look.CloudType, look.HeightVariation, look.Anvil,
+					Math.Clamp( look.CloudHeight / MathF.Max( l.TopMeters - l.BottomMeters, 1f ), 0.02f, 1f ) ),
 			};
 		}
 
@@ -870,12 +908,21 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 
 		// Advance wind. The sample position is shifted by this offset, so the
 		// clouds move WITH the wind direction when the offset moves AGAINST it.
+		// With weather, one wind for all layers that strengthens with altitude
+		// (~+15% per km above 1 km), as real winds aloft do.
 		foreach ( var layer in Layers )
 		{
 			if ( layer is null ) continue;
-			float rad = layer.WindDirectionDegrees * MathF.PI / 180f;
+			float speed = layer.WindSpeed, dirDeg = layer.WindDirectionDegrees;
+			if ( Weather is not null )
+			{
+				float midKm = (layer.BottomMeters + layer.TopMeters) * 0.0005f;
+				speed = Weather.WindSpeed * (1f + 0.15f * MathF.Max( midKm - 1f, 0f ));
+				dirDeg = Weather.WindDirectionDegrees;
+			}
+			float rad = dirDeg * MathF.PI / 180f;
 			var dir = new Vector2( MathF.Cos( rad ), MathF.Sin( rad ) );
-			layer.WindOffset -= dir * layer.WindSpeed * Time.Delta;
+			layer.WindOffset -= dir * speed * Time.Delta;
 		}
 	}
 
@@ -927,7 +974,8 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		// --- World / limits (all in meters) ---
 		SetShared( "ground_z", GroundLevel * InchToMeter );
 		SetShared( "max_cloud_distance", MaxCloudDistanceKm * 1000f );
-		SetShared( "extinction", ExtinctionPerMeter );
+		SetShared( "extinction", ExtinctionPerMeter * (Weather?.ExtinctionScale ?? 1f) );
+		SetShared( "mie_scale", Weather?.Haze ?? 1f );
 		SetShared( "step_schedule", (float)(int)StepSchedule );
 
 		// (The camera far plane comes from the engine's g_flFarPlane in the shader.)

@@ -139,6 +139,9 @@ static const float  H_MIE    = 1.2;
 // "static const float3 X = float3(...)" declarations.
 #define BETA_R float3(0.0058, 0.0135, 0.0331)
 static const float  BETA_M   = 0.021;
+// Haze from the weather (WeatherPreset.Haze): scales Mie scattering. Set by C# every frame.
+float mie_scale < Attribute("mie_scale"); > ;
+#define BETA_MIE (BETA_M * mie_scale)
 #define BETA_O float3(0.00065, 0.001881, 0.000085)
 
 float PhaseRayleigh(float mu)
@@ -208,7 +211,7 @@ bool AtmoLightDepth(float3 P, float3 sun, out float3 tau)
         odO += max(0.0, 1.0 - abs(h - 25.0) / 15.0) * ds;
     }
 
-    tau = BETA_R * odR + BETA_M * 1.1 * odM + BETA_O * odO;
+    tau = BETA_R * odR + BETA_MIE * 1.1 * odM + BETA_O * odO;
     return true;
 }
 
@@ -243,7 +246,7 @@ float3 AtmoInscatter(float3 p0, float3 rd, float tmax, int steps, float jitter,
         if (AtmoLightDepth(P, sun, tauL))
         {
             // View optical depth up to the middle of this step.
-            float3 tau = BETA_R * (odR + 0.5 * dR) + BETA_M * 1.1 * (odM + 0.5 * dM)
+            float3 tau = BETA_R * (odR + 0.5 * dR) + BETA_MIE * 1.1 * (odM + 0.5 * dM)
                        + BETA_O * (odO + 0.5 * dO) + tauL;
             float3 att = exp(-tau);
             sumR += dR * att;
@@ -253,10 +256,10 @@ float3 AtmoInscatter(float3 p0, float3 rd, float tmax, int steps, float jitter,
         odR += dR; odM += dM; odO += dO;
     }
 
-    transmittance = exp(-(BETA_R * odR + BETA_M * 1.1 * odM + BETA_O * odO));
+    transmittance = exp(-(BETA_R * odR + BETA_MIE * 1.1 * odM + BETA_O * odO));
 
     float mu = dot(rd, sun);
-    return sunIntensity * (sumR * BETA_R * PhaseRayleigh(mu) + sumM * BETA_M * PhaseMie(mu, 0.76));
+    return sunIntensity * (sumR * BETA_R * PhaseRayleigh(mu) + sumM * BETA_MIE * PhaseMie(mu, 0.76));
 }
 
 // ------------------------------------------------------------------

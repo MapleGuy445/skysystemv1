@@ -45,7 +45,7 @@
       "Flags": 0,
       "Name": "Sun",
       "Position": "0,0,0",
-      "Rotation": "-0.224473536,0.417078197,0.417392164,0.775526404",
+      "Rotation": "0.569548547,0.0487747677,0.817517042,-0.0700101852",
       "Scale": "1,1,1",
       "Tags": "light_directional,light",
       "Enabled": true,
@@ -106,7 +106,7 @@
           "FogStrength": 1,
           "IncludeStaticShadowCasters": false,
           "Intensity": 1,
-          "LightColor": "0.91181,0.7957,0.625,1",
+          "LightColor": "0,0,0,1",
           "MixedShadows": false,
           "OnComponentDestroy": null,
           "OnComponentDisabled": null,
@@ -128,7 +128,7 @@
           "__guid": "7eec6cd9-1af7-4075-981e-5eff2e56b6c0",
           "__enabled": true,
           "Flags": 0,
-          "Color": "0.252,0.398,0.76,1",
+          "Color": "0.01197,0.01796,0.03991,1",
           "OnComponentDestroy": null,
           "OnComponentDisabled": null,
           "OnComponentEnabled": null,
@@ -144,7 +144,7 @@
       "__version": 2,
       "Flags": 0,
       "Name": "Camera",
-      "Position": "99409.2109,-43415.6719,251980.516",
+      "Position": "99409.2109,-43415.6719,0",
       "Rotation": "-0.0557774492,0.132320672,0.384406924,0.911927342",
       "Scale": "1,1,1",
       "Tags": "",
@@ -249,7 +249,7 @@
           },
           "AmbientIntensity": 1,
           "CloudExposure": 0.6,
-          "DayLengthSeconds": 0,
+          "DayLengthSeconds": 10,
           "DebugView": "Off",
           "DriveSun": true,
           "ExtinctionPerMeter": 0.015,
@@ -260,20 +260,21 @@
           "Layers": [
             {
               "Enabled": true,
-              "BottomMeters": 1200,
-              "TopMeters": 6500,
-              "Coverage": 0.02173913,
-              "Density": 0.8152174,
-              "CloudType": 0.4021739,
-              "HeightVariation": 0.4347826,
-              "Anvil": 0.29891303,
+              "BottomMeters": 1500,
+              "TopMeters": 9000,
+              "Coverage": 0.5,
+              "Density": 1,
+              "CloudType": 0.5,
+              "HeightVariation": 0,
+              "Anvil": 0,
+              "CloudHeightMeters": 20000,
               "ShapeTilesPerKm": 0.12,
               "DetailTilesPerKm": 2.5,
               "WeatherTilesPerKm": 0.02,
-              "WeatherInfluence": 0.7880435,
+              "WeatherInfluence": 0.8,
               "DetailStrength": 0.6,
               "WindDirectionDegrees": 0,
-              "WindSpeed": 100
+              "WindSpeed": 5
             }
           ],
           "MaxCloudDistanceKm": 200,
@@ -309,7 +310,7 @@
           "SyncSceneLights": true,
           "Temporal": true,
           "TemporalBlend": 0.7673374,
-          "TimeOfDay": 13.826458,
+          "TimeOfDay": 0.22514938,
           "ViewStepsOverride": 0
         },
         {
@@ -757,6 +758,75 @@
           "ShadowHardness": 0,
           "Shadows": true,
           "Temperature": 6500
+        }
+      ],
+      "Children": []
+    },
+    {
+      "__guid": "d4a9974a-cc14-47da-b585-0782b69806e5",
+      "__version": 2,
+      "Flags": 0,
+      "Name": "Weather",
+      "Position": "0,0,0",
+      "Rotation": "0,0,0,1",
+      "Scale": "1,1,1",
+      "Tags": "",
+      "Enabled": true,
+      "NetworkMode": 2,
+      "NetworkFlags": 0,
+      "NetworkOrphaned": 0,
+      "NetworkTransmit": true,
+      "OwnerTransfer": 1,
+      "Components": [
+        {
+          "__type": "WeatherSystem",
+          "__guid": "2572786a-a1f3-4595-8a80-4e8cd714b8da",
+          "__enabled": true,
+          "Flags": 0,
+          "AutoCycle": true,
+          "Changeability": 5,
+          "Clouds": {
+            "_type": "component",
+            "component_id": "1707e429-dc1d-45fa-a33d-1440359aad08",
+            "go": "3ee1c9f4-07be-4e0b-8b23-67bee2d8ec8a",
+            "component_type": "SkyCloudSystem"
+          },
+          "CyclePresets": [
+            {
+              "Id": "5fa7716d-747c-4299-b5cf-49a468547efd",
+              "Path": "weather/clear.weather"
+            },
+            {
+              "Id": "bf55c3e3-5c7c-46ba-aac1-cc7885b5dae6",
+              "Path": "weather/partly_cloudy.weather"
+            },
+            {
+              "Id": "e141987a-ab02-4260-8abc-fab364d22cc8",
+              "Path": "weather/towering_cumulus.weather"
+            },
+            {
+              "Id": "eb338d50-e980-476e-9b1f-286e9398920f",
+              "Path": "weather/overcast.weather"
+            },
+            {
+              "Id": "5a6aa477-9ede-425d-9e6f-615558d0a91b",
+              "Path": "weather/storm.weather"
+            }
+          ],
+          "DiurnalStrength": 0,
+          "HoursPerRealMinute": 0.05,
+          "OnComponentDestroy": null,
+          "OnComponentDisabled": null,
+          "OnComponentEnabled": null,
+          "OnComponentFixedUpdate": null,
+          "OnComponentStart": null,
+          "OnComponentUpdate": null,
+          "Seed": 0,
+          "TransitionSeconds": 0,
+          "Weather": {
+            "Id": "5fa7716d-747c-4299-b5cf-49a468547efd",
+            "Path": "weather/clear.weather"
+          }
         }
       ],
       "Children": []

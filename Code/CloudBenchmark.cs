@@ -50,15 +50,20 @@ public sealed class CloudBenchmark : Component
 	/// <summary>One pass: a quality tier (null = component off) and optional feature switches.</summary>
 	record struct Pass( string Name, CloudQuality? Quality, bool Clouds = true, bool Sky = true, bool Aerial = true );
 
-	readonly List<Pass> _passes = new();
+	// Lazy: hot reload can leave initialized fields null on an existing component.
+	List<Pass> _passesStore;
+	List<Pass> _passes => _passesStore ??= new();
 
 	// Settings restored between and after passes.
-	readonly List<bool> _layerEnabled = new();
+	List<bool> _layerEnabledStore;
+	List<bool> _layerEnabled => _layerEnabledStore ??= new();
 	bool _replaceSky;
 	float _aerial;
-	readonly List<float> _gpu = new();
-	readonly List<float> _cpu = new();
-	readonly List<string> _results = new();
+	List<float> _gpuStore, _cpuStore;
+	List<string> _resultsStore;
+	List<float> _gpu => _gpuStore ??= new();
+	List<float> _cpu => _cpuStore ??= new();
+	List<string> _results => _resultsStore ??= new();
 
 	int _pass = -1;
 	float _passStart;

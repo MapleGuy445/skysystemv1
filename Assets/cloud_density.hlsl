@@ -32,7 +32,7 @@ struct CloudLayer
     float4 range;  // x bottom (m), y top (m), z coverage, w density
     float4 prm;    // x shape freq (1/m), y/z wind offset (m), w detail strength
     float4 nz;     // x detail freq (1/m), y weather freq (1/m), z weather influence, w reserved
-    float4 shape;  // x cloud type (0 stratus, 0.5 cumulus, 1 cumulonimbus), y height variation, z anvil, w reserved
+    float4 shape;  // x cloud type (0 stratus, 0.5 cumulus, 1 cumulonimbus), y height variation, z anvil, w cloud height (fraction of the layer)
 };
 
 StructuredBuffer<CloudLayer> CloudLayers < Attribute("CloudLayers"); > ;
@@ -74,15 +74,15 @@ float BaseCloudDensity(float3 pos, CloudLayer L, out float h)
     if (coverage <= 0.01)
         return 0.0;
 
-    // ---- Per-cloud top height ----
-    // Per-cloud signal: the low-frequency Worley channel of the shape texture on
-    // a fixed slice gives roughly one cell per cloud. Combined with the regional
-    // weather signal and squared so most clouds stay small and towers are rare.
-    float cell = shapeNoise.SampleLevel(sCloudNoise, float3(p.xy * L.prm.x, 0.37), 0).g;
-    float tall = saturate((cell * 0.55 + weather.g * 0.6 + coverage * 0.25) - 0.35) * 1.6;
-    tall = saturate(tall);
-    tall *= tall;
-    float topFrac = lerp(1.0, lerp(0.12, 1.0, tall), L.shape.y);
+    // ---- Cloud tops: regional, not per point (2026-11-11) ----
+    // How tall clouds grow is set per weather (shape.w: cloud height as a
+    // fraction of the layer). Below that, tops vary only with the weather map's
+    // slow height signal (~8 km features), so neighbouring clouds share a top and
+    // each cloud's outline comes from the 3D noise: rounded billows. Deriving the
+    // top from a per-point height map instead made every cloud top a terrain-like
+    // surface (pointed humps, later straight-sided pillars).
+    float region = smoothstep(0.2, 0.8, weather.g);
+    float topFrac = max(L.shape.w, 0.02) * lerp(1.0, lerp(0.3, 1.0, region), L.shape.y);
 
     float hn = hLayer / topFrac;
     h = saturate(hn);
@@ -108,7 +108,9 @@ float BaseCloudDensity(float3 pos, CloudLayer L, out float h)
 
     // Coverage only decides WHERE clouds exist (the threshold); how thick they
     // are is controlled by Density and extinction.
-    return saturate(CloudRemap(shape, 1.0 - coverage, 1.0, 0.0, 1.0));
+    // Scaled by coverage (Schneider 2015), so sparse clouds stay thin, separate
+    // puffs instead of merging into one mass.
+    return saturate(CloudRemap(shape, 1.0 - coverage, 1.0, 0.0, 1.0)) * coverage;
 }
 
 // Cheap density for the sun-ward light march: no detail erosion.
