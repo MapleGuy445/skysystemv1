@@ -14,7 +14,7 @@
 
 // Sun / moon
 float3 sun_dir          < Attribute("sun_dir"); > ;           // direction TOWARD the sun
-float3 sun_color        < Attribute("sun_color"); > ;         // cloud direct light (tinted by atmosphere, includes intensity)
+float3 sun_color        < Attribute("sun_color"); > ;         // sun colour x intensity, UNtinted (see SunTransmittanceAt)
 float3 ambient_top      < Attribute("ambient_top"); > ;
 float3 ambient_bottom   < Attribute("ambient_bottom"); > ;
 float  sun_disk_cos     < Attribute("sun_disk_cos"); > ;
@@ -47,8 +47,22 @@ float debug_mode   < Attribute("debug_mode"); > ;
 static const float INCH_TO_M  = 0.0254;
 static const int   MAX_LAYERS = 8;   // must match SkyCloudSystem.MaxLayers
 static const int   MAX_STEPS  = 128;
-static const int   MAX_ANCHORED_STEPS = 256;
+static const int   MAX_ANCHORED_STEPS = 1024;  // camera-anchored march: cells per ray, all layers
 static const float PI_F       = 3.14159265;
+
+// Sun transmittance by altitude above ground_z (C# AtmosphereCpu, every frame):
+// entry i is at i / (SUN_LUT_SIZE - 1) * sun_lut_top meters. Clouds are lit
+// with the tint at their OWN altitude, so moving the camera does not relight them.
+StructuredBuffer<float4> SunTransLut < Attribute("SunTransLut"); > ;
+float sun_lut_top < Attribute("sun_lut_top"); > ;
+static const int SUN_LUT_SIZE = 32;   // must match SkyCloudSystem.SunLutSize
+
+float3 SunTransmittanceAt(float altM)
+{
+    float x = saturate(altM / max(sun_lut_top, 1.0)) * (SUN_LUT_SIZE - 1);
+    int i0 = min((int)x, SUN_LUT_SIZE - 2);
+    return lerp(SunTransLut[i0].rgb, SunTransLut[i0 + 1].rgb, x - i0);
+}
 
 // Cloud density (declares the noise textures and the CloudLayers buffer).
 #include "cloud_density.hlsl"
@@ -258,7 +272,7 @@ float3 SkyRadiance(float3 p0, float camAltKm, float3 rd, float jitter, int steps
     if (tGround > 0.0)
     {
         float3 ins = AtmoInscatter(p0, rd, tGround, max(steps / 2, 4), jitter, sun_dir, sky_sun_intensity, viewT);
-        float3 ground = ins + ground_albedo * (sun_color * saturate(sun_dir.z) * 0.3183 + ambient_bottom) * viewT;
+        float3 ground = ins + ground_albedo * (sun_color * SunTransmittanceAt(0.0) * saturate(sun_dir.z) * 0.3183 + ambient_bottom) * viewT;
 
         // Horizon haze at the same azimuth, aimed just above the geometric horizon.
         float dip = sqrt(2.0 * camAltKm / PLANET_R); // sine of the horizon depression
@@ -391,7 +405,7 @@ float3 CloudLighting(float3 pos, CloudLayer L,
 
     float3 ambient = lerp(ambient_bottom, ambient_top, hFrac) * lerp(0.5, 1.0, hFrac);
 
-    return sun_color * direct + ambient;
+    return sun_color * SunTransmittanceAt(pos.z - ground_z) * direct + ambient;
 }
 
 // ------------------------------------------------------------------
@@ -419,8 +433,9 @@ float3 CloudLayerIntervals(CloudRay r)
 // One view-march sample at distance tS covering a segment of length dt:
 // density, extinction, and (when it matters) the light march. Accumulates
 // into the caller's transmittance / scatter / distance-weight state.
+// Returns the density found (0 = empty air), used by the adaptive march.
 // ------------------------------------------------------------------
-void CloudMarchSample(float3 ro, float3 rd, CloudLayer L, float tS, float dt, float cosSun, int lightSteps,
+float CloudMarchSample(float3 ro, float3 rd, CloudLayer L, float tS, float dt, float cosSun, int lightSteps, float fadeEnd,
                       inout float transmittance, inout float3 scatter, inout float weightSum, inout float distSum)
 {
     float3 pos = ro + rd * tS;
@@ -428,11 +443,11 @@ void CloudMarchSample(float3 ro, float3 rd, CloudLayer L, float tS, float dt, fl
     float hCloud;
     float dens = SampleDensity(pos, L, detailW, hCloud);
 
-    // Fade toward the distance cap so the cutoff is invisible.
-    dens *= 1.0 - smoothstep(0.6 * max_cloud_distance, max_cloud_distance, tS);
+    // Fade toward the march's reach (normally max_cloud_distance) so the cutoff is invisible.
+    dens *= 1.0 - smoothstep(0.6 * fadeEnd, fadeEnd, tS);
 
     if (dens <= 0.001)
-        return;
+        return 0.0;
 
     float sigma = dens * extinction;
     float stepT = exp(-sigma * dt);
@@ -451,6 +466,7 @@ void CloudMarchSample(float3 ro, float3 rd, CloudLayer L, float tS, float dt, fl
     }
 
     transmittance *= stepT;
+    return dens;
 }
 
 // ------------------------------------------------------------------
@@ -499,18 +515,28 @@ float4 MarchClouds(CloudRay r, float jitter, out float cloudDist)
     //     placed from the entry point. The entry of a near-horizontal ray moves
     //     by (camera height change) / rd.z, so camera motion slid the whole
     //     sample pattern through the clouds: crawling stripes.
-    //  1  camera anchored: one schedule measured from the camera,
-    //     t(u) = A * (exp(u) - 1) with uniform cells in u (spacing grows with
-    //     distance: ~A*du near, ~t*du far). The base grid spreads 2 x steps cells
-    //     over [0, max distance]; a layer the ray crosses quickly refines it by a
-    //     power of two (up to 16x) so it still gets about 'steps' samples.
-    //     Refined grids nest inside the base grid, so samples stay put when the
-    //     camera moves (no amplified sliding) and far clouds are not cut off.
+    //  1  camera anchored (default; rewritten 2026-11-11):
+    //     Cells on t(u) = A * (exp(u) - 1) with uniform du, i.e. a step of about
+    //     (t + A) * du: on High ~25 m near the camera, ~50 m at 5 km, ~275 m at
+    //     50 km. Every cell inside a layer is sampled. The step length depends
+    //     ONLY on distance from the camera, and inside clouds it is short enough
+    //     that the result does not depend on where exactly samples land.
+    //     History of what failed (all made the lighting move with the camera):
+    //     entry-relative steps (crawling stripes), per-ray power-of-two refinement
+    //     (horizontal bars), per-pixel level dithering (warping), per-layer levels
+    //     (lighting shifting with height), and coarse empty-space skipping (cloud
+    //     parts skipped depending on where the camera-anchored coarse cells fell:
+    //     lighting crawling across the clouds).
+    //     The cells partition [0, max distance], so a budget of that many cells
+    //     can never run out; only the MAX_ANCHORED_STEPS cap can, and then the
+    //     clouds fade at a fixed distance from the camera (the cap's reach).
     bool anchored = step_schedule > 0.5;
 
-    const float ANCHOR_A = 500.0;          // meters: roughly uniform spacing inside this range
-    int anchorCells = min(steps * 2, MAX_ANCHORED_STEPS);
-    float du = log(max_cloud_distance / ANCHOR_A + 1.0) / anchorCells;
+    const float ANCHOR_A = 5000.0;         // meters: steps grow linearly with distance beyond this
+    float du = 0.2 / steps;                // cell size in u: High (40) 0.005, Ultra (56) 0.0036
+    int cellsToMax = (int)ceil(log(max_cloud_distance / ANCHOR_A + 1.0) / du);
+    int budget = min(cellsToMax, MAX_ANCHORED_STEPS);
+    float anchoredReach = min(max_cloud_distance, ANCHOR_A * (exp(budget * du) - 1.0));
 
     [loop] for (int s = 0; s < layerCount; s++)
     {
@@ -522,34 +548,22 @@ float4 MarchClouds(CloudRay r, float jitter, out float cloudDist)
 
         if (anchored)
         {
-            float uIn = log(t.x / ANCHOR_A + 1.0);
-            float uOut = log(t.y / ANCHOR_A + 1.0);
+            int k = (int)floor(log(t.x / ANCHOR_A + 1.0) / du);
+            int kEnd = (int)ceil(log(t.y / ANCHOR_A + 1.0) / du);
 
-            // Power-of-two refinement so this layer gets about 'steps' cells.
-            // Rounded to the NEAREST power of two (0.7x to 1.4x steps, ~1x on
-            // average); rounding up gave 1x to 2x and cost ~36% more than the
-            // per-layer schedule at the same tier (benchmark 2026-10-30).
-            float wantDu = max((uOut - uIn) / steps, 0.000001);
-            float sub = exp2(clamp(round(log2(du / wantDu)), 0.0, 4.0));
-            float duL = du / sub;
-
-            int k0 = (int)floor(uIn / duL);
-            int k1 = (int)ceil(uOut / duL);
-            int cells = 0;
-
-            [loop] for (int k = k0; k < k1; k++)
+            [loop] for (int it = 0; it < MAX_ANCHORED_STEPS; it++)
             {
-                if (cells >= MAX_ANCHORED_STEPS || transmittance < 0.01) break;
-                cells++;
+                if (k >= kEnd || budget <= 0 || transmittance < 0.01) break;
+                budget--;
 
-                // Cell [ta, tb] of the schedule, clipped to this layer.
-                float ta = max(ANCHOR_A * (exp(k * duL) - 1.0), t.x);
-                float tb = min(ANCHOR_A * (exp((k + 1) * duL) - 1.0), t.y);
+                // Cell [ta, tb], clipped to the layer; jittered sample inside it.
+                float ta = max(ANCHOR_A * (exp(k * du) - 1.0), t.x);
+                float tb = min(ANCHOR_A * (exp((k + 1) * du) - 1.0), t.y);
+                float tS = clamp(ANCHOR_A * (exp((k + jitter) * du) - 1.0), ta, tb);
+                k++;
                 if (tb <= ta) continue;
 
-                // Jittered position inside the cell (clipped cells keep the sample inside the layer).
-                float tS = clamp(ANCHOR_A * (exp((k + jitter) * duL) - 1.0), ta, tb);
-                CloudMarchSample(ro, rd, L, tS, tb - ta, cosSun, lightSteps, transmittance, scatter, weightSum, distSum);
+                CloudMarchSample(ro, rd, L, tS, tb - ta, cosSun, lightSteps, anchoredReach, transmittance, scatter, weightSum, distSum);
             }
         }
         else
@@ -571,7 +585,7 @@ float4 MarchClouds(CloudRay r, float jitter, out float cloudDist)
 
                 float tS = t.x + D * pow(uS, expo);
                 float dt = D * (pow(u1, expo) - pow(u0, expo));
-                CloudMarchSample(ro, rd, L, tS, dt, cosSun, lightSteps, transmittance, scatter, weightSum, distSum);
+                CloudMarchSample(ro, rd, L, tS, dt, cosSun, lightSteps, max_cloud_distance, transmittance, scatter, weightSum, distSum);
             }
         }
 

@@ -68,7 +68,8 @@ CS
         {
             uint bnW, bnH;
             BlueNoise.GetDimensions(bnW, bnH);
-            float bn = BlueNoise[id.xy % uint2(max(bnW, 1u), max(bnH, 1u))].r;
+            uint2 bnSize = uint2(max(bnW, 1u), max(bnH, 1u));
+            float bn = BlueNoise[id.xy % bnSize].r;
             jitter = frac(bn + frame_index * 0.61803398875);
         }
         else

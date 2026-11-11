@@ -307,7 +307,13 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	// Per-frame atmosphere state (computed in OnUpdate, consumed in Render)
 	Vector3 _sunDir = new Vector3( 0.3f, 0.2f, 0.8f ).Normal;
 	Vector3 _moonDir = new Vector3( -0.3f, -0.2f, -0.8f ).Normal;
-	Vector3 _sunLight = Vector3.One;     // base colour * transmittance * SunIntensity (for clouds)
+	Vector3 _sunLight = Vector3.One;     // base colour * SunIntensity (for clouds; tinted per altitude in the shader)
+
+	// Sun transmittance by altitude, 0 to SunLutTopMeters above GroundLevel (rgb), refreshed every frame.
+	const int SunLutSize = 32;
+	const float SunLutTopMeters = 20000f;
+	Vector4[] _sunLutData; // created lazily (hot reload leaves new initialized fields null)
+	GpuBuffer<Vector4> _sunLut;
 	Vector3 _ambientTop = new Vector3( 0.3f, 0.45f, 0.8f );
 	Vector3 _ambientBottom = new Vector3( 0.1f, 0.12f, 0.15f );
 
@@ -371,6 +377,8 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		DisposeNoise();
 		_layerBuffer?.Dispose();
 		_layerBuffer = null;
+		_sunLut?.Dispose();
+		_sunLut = null;
 		DisposeTrace();
 		_placeholder3D?.Dispose();
 		_placeholder2D?.Dispose();
@@ -489,16 +497,27 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		// Moon sits roughly opposite the sun, nudged so it is not exactly antipodal.
 		_moonDir = (-_sunDir + new Vector3( 0.2f, 0.1f, 0.35f )).Normal;
 
-		// ---- Camera altitude ----
-		float camZ = Scene?.Camera?.WorldPosition.z ?? GroundLevel;
-		double altKm = Math.Clamp( (camZ - GroundLevel) * InchToMeter * 0.001, 0.0005, 80.0 );
-
 		// ---- Sunlight after passing through the atmosphere ----
+		// Tinted per ALTITUDE, not at the camera: each cloud sample looks up the
+		// transmittance at its own height (_sunTransLut, SunTransmittanceAt in
+		// cloud_common.hlsl). Tinting everything at the camera's altitude made
+		// all clouds relight whenever the camera moved up or down, most visibly
+		// near sunrise and sunset (fixed 2026-11-11).
 		float e = _sunDir.z;
-		Vector3 transmittance = AtmosphereCpu.SunTransmittance( altKm, e );
-		Vector3 sunTinted = Mul( Rgb( SunColor ), transmittance );
+		if ( _sunLutData is null || _sunLutData.Length != SunLutSize )
+			_sunLutData = new Vector4[SunLutSize];
+		for ( int i = 0; i < SunLutSize; i++ )
+		{
+			double altKm = Math.Max( i * SunLutTopMeters / (SunLutSize - 1) * 0.001, 0.0005 );
+			var t = AtmosphereCpu.SunTransmittance( altKm, e );
+			_sunLutData[i] = new Vector4( t.x, t.y, t.z, 0f );
+		}
 
-		_sunLight = sunTinted * SunIntensity;
+		// Ground-level tint: scene sun light, ground bounce under clouds.
+		var tGround = new Vector3( _sunLutData[0].x, _sunLutData[0].y, _sunLutData[0].z );
+		Vector3 sunTinted = Mul( Rgb( SunColor ), tGround );
+
+		_sunLight = Rgb( SunColor ) * SunIntensity; // untinted; the shader applies the per-altitude tint
 
 		// ---- Ambient: day/night + warm twilight ----
 		float dayK = SmoothStep( -0.08f, 0.25f, e );
@@ -617,10 +636,68 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 	bool _historyValid;
 	Vector3 _lastCameraPos;
 
+	// Lighting used last frame, to limit how far the temporal history may lag behind it.
+	Vector3 _prevSunLight, _prevAmbientTop, _prevAmbientBottom, _prevSunDir;
+	bool _hasPrevLighting;
+
+	/// <summary>
+	/// Largest relative error the temporal history may carry when the lighting changes.
+	/// History blended with weight b lags about 1 / (1 - b) frames, so with a per-frame
+	/// lighting change d it is off by about d / (1 - b); keep that under this tolerance.
+	/// </summary>
+	const float LightingLagTolerance = 0.01f;
+
+	/// <summary>
+	/// History weight for this frame: TemporalBlend, lowered when the cloud lighting
+	/// (sun colour/brightness, ambient, sun direction) changes quickly, e.g. a short
+	/// day length around sunrise and sunset. Otherwise the neighborhood clamp lets old
+	/// lighting linger on cloud edges (whose 3x3 neighborhood mixes cloud and empty
+	/// sky, so the clamp range is wide): bright outlines that fade a moment later.
+	/// </summary>
+	float LightingAwareBlend()
+	{
+		static float Rel( Vector3 a, Vector3 b ) =>
+			(a - b).Length / MathF.Max( (a.Length + b.Length) * 0.5f, 0.02f );
+
+		float change = 0f;
+		if ( _hasPrevLighting )
+		{
+			change = MathF.Max( Rel( TintedSunLight(), _prevSunLight ),
+				MathF.Max( Rel( _ambientTop, _prevAmbientTop ), Rel( _ambientBottom, _prevAmbientBottom ) ) );
+
+			// Sun direction: 1 radian of rotation counted as a 100% lighting change.
+			float cos = Math.Clamp( Vector3.Dot( _sunDir, _prevSunDir ), -1f, 1f );
+			change += MathF.Acos( cos );
+		}
+
+		_prevSunLight = TintedSunLight();
+		_prevAmbientTop = _ambientTop;
+		_prevAmbientBottom = _ambientBottom;
+		_prevSunDir = _sunDir;
+		_hasPrevLighting = true;
+
+		float maxBlend = 1f - change / LightingLagTolerance;
+		EffectiveTemporalBlend = Math.Clamp( MathF.Min( TemporalBlend, maxBlend ), 0f, TemporalBlend );
+		return EffectiveTemporalBlend;
+	}
+
+	/// <summary>The history weight actually used last frame (TemporalBlend, or less while the lighting changes quickly).</summary>
+	public float EffectiveTemporalBlend { get; private set; }
+
 	void SetShared( string name, float v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
 	void SetShared( string name, Vector3 v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
 	void SetShared( string name, Vector4 v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
 	void SetShared( string name, Vector2 v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
+	void SetShared( string name, GpuBuffer<Vector4> v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
+
+	/// <summary>Sun light tinted at ground level and at ~5 km, for the temporal lighting-change check.</summary>
+	Vector3 TintedSunLight()
+	{
+		if ( _sunLutData is null ) return _sunLight;
+		var g = _sunLutData[0];
+		var h = _sunLutData[SunLutSize / 4];
+		return Mul( _sunLight, new Vector3( g.x + h.x, g.y + h.y, g.z + h.z ) * 0.5f );
+	}
 	void SetShared( string name, Texture v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
 	void SetShared( string name, GpuBuffer<CloudLayerGpu> v ) { Attributes.Set( name, v ); _traceCl.Attributes.Set( name, v ); }
 
@@ -708,7 +785,7 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		_traceCl.Attributes.Set( "CloudDepth", _cloudDepth );
 		_traceCl.Attributes.Set( "CloudHistory", read );
 		_traceCl.Attributes.Set( "CloudResolved", write );
-		_traceCl.Attributes.Set( "temporal_blend", TemporalBlend );
+		_traceCl.Attributes.Set( "temporal_blend", LightingAwareBlend() );
 		_traceCl.Attributes.Set( "has_history", _historyValid ? 1f : 0f );
 		_traceCl.Attributes.Set( "CloudSizeState", _sizeState );
 		_traceCl.Attributes.Set( "size_slot", (float)(_frameIndex & 1) );
@@ -822,6 +899,11 @@ public sealed class SkyCloudSystem : BasePostProcess<SkyCloudSystem>
 		// --- Sun / moon ---
 		SetShared( "sun_dir", _sunDir );
 		SetShared( "sun_color", _sunLight );
+		_sunLut ??= new GpuBuffer<Vector4>( SunLutSize );
+		if ( _sunLutData is not null )
+			_sunLut.SetData( _sunLutData );
+		SetShared( "SunTransLut", _sunLut );
+		SetShared( "sun_lut_top", SunLutTopMeters );
 		SetShared( "ambient_top", _ambientTop );
 		SetShared( "ambient_bottom", _ambientBottom );
 		SetShared( "sun_disk_cos", MathF.Cos( SunDiskDegrees * MathF.PI / 180f ) );
